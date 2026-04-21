@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Node
+dashboard/node_modules/
+dashboard/.next/
+out/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Local env
+.env
+.env.*
+context.md
+Untitled Diagram.drawio.xml

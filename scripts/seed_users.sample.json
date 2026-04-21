@@ -1,0 +1,28 @@
+[
+  {
+    "email": "admin@orchid.local",
+    "password": "Passw0rd!23",
+    "displayName": "ORCHID Admin",
+    "role": "admin",
+    "skills": [],
+    "availability": true
+  },
+  {
+    "email": "responder.a@orchid.local",
+    "password": "Passw0rd!23",
+    "displayName": "Responder A",
+    "role": "responder",
+    "skills": ["first_aid"],
+    "availability": true,
+    "lastKnownLocation": { "lat": 12.9716, "lng": 77.5946 }
+  },
+  {
+    "email": "responder.b@orchid.local",
+    "password": "Passw0rd!23",
+    "displayName": "Responder B",
+    "role": "responder",
+    "skills": ["first_aid", "fire_safety"],
+    "availability": true,
+    "lastKnownLocation": { "lat": 12.9719, "lng": 77.595 }
+  }
+]
