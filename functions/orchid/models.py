@@ -10,6 +10,13 @@ INCIDENT_STATUS_ASSIGNED = "assigned"
 INCIDENT_STATUS_ACKNOWLEDGED = "acknowledged"
 INCIDENT_STATUS_UNACKED_ESCALATION = "unacked_escalation"
 
+ASSIGNMENT_PHASE_INITIAL = "initial"
+ASSIGNMENT_PHASE_RETRY = "retry"
+
+ALLOCATION_STATUS_PROCESSING = "processing"
+ALLOCATION_STATUS_COMPLETED = "completed"
+ALLOCATION_STATUS_NO_CANDIDATE = "no_candidate"
+
 ENRICHMENT_PENDING = "pending"
 ENRICHMENT_COMPLETED = "completed"
 ENRICHMENT_FAILED = "failed"
@@ -30,6 +37,7 @@ class IngestPayload:
     timestamp: str
     image_ref: str | None
     image_base64: str | None
+    image_mime_type: str | None
     mock_label: str | None
     location: dict[str, float] | None
 

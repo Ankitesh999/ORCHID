@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 from .models import AssignmentCandidate
 
 
 SEVERITY_WEIGHT = {
-    "critical": 3.0,
-    "high": 2.0,
-    "medium": 1.5,
-    "low": 1.0,
+    "critical": 2.0,
+    "high": 1.5,
+    "medium": 1.0,
+    "low": 0.7,
 }
 
 
@@ -37,14 +38,50 @@ def haversine_meters(
 
 def required_skill_from_label(label: str | None) -> str:
     if not label:
-        return "general_response"
+        return "general"
 
-    normalized = label.lower()
+    normalized = normalize_detection_label(label)
+    if normalized == "fire":
+        return "fire_response"
+    if normalized in {"medical_distress", "collapse", "seizure"}:
+        return "cpr_certified"
+    return "general"
+
+
+def normalize_detection_label(label: str | None) -> str:
+    if not label:
+        return "general_incident"
+    normalized = re.sub(r"\s+", "_", str(label).strip().lower())
     if "fire" in normalized or "smoke" in normalized:
-        return "fire_safety"
-    if "medical" in normalized or "collapse" in normalized or "seizure" in normalized:
-        return "first_aid"
-    return "general_response"
+        return "fire"
+    if "medical" in normalized and "distress" in normalized:
+        return "medical_distress"
+    if "collapse" in normalized:
+        return "collapse"
+    if "seizure" in normalized:
+        return "seizure"
+    if "fight" in normalized:
+        return "fight"
+    if "injury" in normalized:
+        return "injury"
+    return normalized
+
+
+def severity_from_label(label: str | None) -> str:
+    normalized = normalize_detection_label(label)
+    if normalized == "fire":
+        return "critical"
+    if normalized in {"medical_distress", "collapse", "seizure"}:
+        return "high"
+    if normalized in {"fight", "injury"}:
+        return "medium"
+    return "low"
+
+
+def required_skill_from_detection(*, label: str | None, confidence: float, threshold: float) -> str:
+    if confidence < threshold:
+        return "general"
+    return required_skill_from_label(label)
 
 
 def severity_weight(severity: str | None) -> float:
@@ -59,20 +96,31 @@ def score_responder(
     incident_location: dict[str, float] | None,
     required_skill: str,
     severity: str | None,
+    allow_fallback: bool = False,
 ) -> AssignmentCandidate:
     uid = str(responder.get("uid", ""))
     availability = bool(responder.get("availability", False))
     skills = responder.get("skills", []) or []
-    skill_match = required_skill == "general_response" or required_skill in skills
+    skill_match = required_skill == "general" or required_skill in skills
 
-    if not availability or not skill_match:
+    if not availability:
         return AssignmentCandidate(
             uid=uid,
             score=0.0,
             distance_m=float("inf"),
             skill_match=skill_match,
             available=availability,
-            reason="disqualified",
+            reason="unavailable",
+        )
+
+    if not skill_match and not allow_fallback:
+        return AssignmentCandidate(
+            uid=uid,
+            score=0.0,
+            distance_m=float("inf"),
+            skill_match=False,
+            available=availability,
+            reason=f"missing_{required_skill}",
         )
 
     responder_loc = responder.get("lastKnownLocation") or {}
@@ -83,7 +131,7 @@ def score_responder(
             distance_m=float("inf"),
             skill_match=skill_match,
             available=availability,
-            reason="missing_incident_location",
+            reason="missing_location",
         )
 
     if "lat" not in responder_loc or "lng" not in responder_loc:
@@ -93,7 +141,7 @@ def score_responder(
             distance_m=float("inf"),
             skill_match=skill_match,
             available=availability,
-            reason="missing_responder_location",
+            reason="missing_location",
         )
 
     distance_m = haversine_meters(
@@ -103,7 +151,8 @@ def score_responder(
         float(incident_location["lng"]),
     )
     effective_distance = max(distance_m, 1.0)
-    weight = severity_weight(severity)
+    skill_weight = 1.0 if skill_match else 0.5
+    weight = severity_weight(severity) * skill_weight
     score = (1.0 / effective_distance) * weight
     return AssignmentCandidate(
         uid=uid,
@@ -111,5 +160,5 @@ def score_responder(
         distance_m=distance_m,
         skill_match=skill_match,
         available=availability,
-        reason="ok",
+        reason="fallback" if allow_fallback and not skill_match else "ok",
     )

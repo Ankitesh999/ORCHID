@@ -25,6 +25,7 @@ from orchid.clients import (
     FirestoreIncidentRepository,
     GeminiEnrichmentClient,
     PubSubEventPublisher,
+    VertexDetectionClient,
 )
 from orchid.services import IncidentOrchestrator
 from orchid.settings import load_settings
@@ -42,6 +43,7 @@ def _build_orchestrator() -> IncidentOrchestrator:
         publisher=PubSubEventPublisher(settings),
         scheduler=CloudTasksAckScheduler(settings),
         enricher=GeminiEnrichmentClient(settings),
+        detector=VertexDetectionClient(settings),
         settings=settings,
     )
 
@@ -73,6 +75,15 @@ def _decode_pubsub_event(cloud_event) -> dict[str, Any]:
         return {}
     decoded = base64.b64decode(raw).decode("utf-8")
     return json.loads(decoded)
+
+
+def _incident_id_from_firestore_event(cloud_event) -> str | None:
+    data = cloud_event.data or {}
+    value = data.get("value") or {}
+    name = value.get("name") or ""
+    if "/documents/incidents/" not in name:
+        return None
+    return str(name).rsplit("/", 1)[-1] or None
 
 
 @functions_framework.http
@@ -152,3 +163,12 @@ def enrich_incident(cloud_event):
         logger.warning("enrich_incident received empty payload")
         return
     get_orchestrator().handle_enrichment_event(payload)
+
+
+@functions_framework.cloud_event
+def allocate_initial_incident(cloud_event):
+    incident_id = _incident_id_from_firestore_event(cloud_event)
+    if not incident_id:
+        logger.warning("allocate_initial_incident could not resolve incident id")
+        return
+    get_orchestrator().allocate_initial_assignment(incident_id=incident_id)

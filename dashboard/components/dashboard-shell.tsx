@@ -20,6 +20,13 @@ function formatTime(value?: string | null) {
   return date.toLocaleString();
 }
 
+function formatConfidence(value?: number) {
+  if (value === undefined || value === null) {
+    return "-";
+  }
+  return value.toFixed(2);
+}
+
 export function DashboardShell() {
   const [user, setUser] = useState<User | null>(null);
   const [email, setEmail] = useState("");
@@ -154,12 +161,29 @@ export function DashboardShell() {
               </div>
               <p><strong>Camera:</strong> {incident.cameraId || "-"}</p>
               <p><strong>Provisional:</strong> {incident.classification?.provisional || "-"} ({incident.severity?.provisional || "-"})</p>
+              <p><strong>Vertex Label:</strong> {incident.aiDetection?.label || "-"}</p>
+              <p><strong>Vertex Confidence:</strong> {formatConfidence(incident.aiDetection?.confidence)}</p>
+              <p><strong>Required Skill:</strong> {incident.requiredSkill || "-"}</p>
+              <p><strong>Severity (Rule):</strong> {incident.severity?.provisional || "-"}</p>
               <p><strong>Enriched:</strong> {incident.classification?.enriched || "-"} ({incident.severity?.enriched || "-"})</p>
               <p><strong>Enrichment State:</strong> {incident.enrichmentState || "-"}</p>
+              <p><strong>Evidence:</strong> {incident.aiDetection?.evidenceSummary || "-"}</p>
               <p><strong>Assigned:</strong> {incident.assignedResponderId || "-"}</p>
               <p><strong>Attempt:</strong> {incident.assignmentAttempt || 0} / 3</p>
+              <p><strong>Assignment Phase:</strong> {incident.assignmentPhase || "-"}</p>
+              <p><strong>Allocation State:</strong> {incident.allocation?.status || "-"}</p>
+              <p><strong>Fallback Used:</strong> {incident.allocation?.fallback ? "yes" : "no"}</p>
+              <p><strong>Score Reason:</strong> {incident.allocation?.scoreReason || "-"}</p>
               <p><strong>Ack Deadline:</strong> {formatTime(incident.ackDeadline)}</p>
               <p><strong>Acknowledged At:</strong> {formatTime(incident.acknowledgedAt)}</p>
+              <p><strong>Retry Eligible At:</strong> {formatTime(incident.retryEligibleAt)}</p>
+              <p><strong>Snapshot:</strong> {incident.allocation?.inputSnapshot?.respondersEvaluated ?? 0} responders, skill {incident.allocation?.inputSnapshot?.requiredSkill || "-"}, severity {incident.allocation?.inputSnapshot?.severity || "-"}, confidence {formatConfidence(incident.allocation?.inputSnapshot?.confidence)}</p>
+              <p><strong>Snapshot Evaluated:</strong> {formatTime(incident.allocation?.inputSnapshot?.evaluatedAt)}</p>
+              {(incident.allocation?.topCandidates || []).slice(0, 3).map((candidate) => (
+                <p key={`${incident.id}-${candidate.id}`}>
+                  <strong>Candidate:</strong> {candidate.id} | score {candidate.score.toFixed(6)} | distance {candidate.distanceMeters ?? "-"}m | qualified {candidate.qualified ? "yes" : "no"} | rejected {candidate.rejectedReason || "-"}
+                </p>
+              ))}
               <p><strong>Created:</strong> {formatTime(incident.createdAt)}</p>
               <p><strong>Updated:</strong> {formatTime(incident.updatedAt)}</p>
               {incident.summary ? <p><strong>Summary:</strong> {incident.summary}</p> : null}

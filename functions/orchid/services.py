@@ -4,8 +4,11 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .clients import AckScheduler, EnrichmentClient, EventPublisher, IncidentRepository
+from .clients import AckScheduler, DetectionClient, EnrichmentClient, EventPublisher, IncidentRepository
 from .models import (
+    ALLOCATION_STATUS_NO_CANDIDATE,
+    ASSIGNMENT_PHASE_INITIAL,
+    ASSIGNMENT_PHASE_RETRY,
     ENRICHMENT_PENDING,
     INCIDENT_STATUS_ACKNOWLEDGED,
     INCIDENT_STATUS_ASSIGNED,
@@ -16,7 +19,7 @@ from .models import (
     safe_get,
     utcnow,
 )
-from .scoring import required_skill_from_label, score_responder
+from .scoring import normalize_detection_label, required_skill_from_detection, score_responder, severity_from_label
 from .settings import AppSettings
 
 
@@ -26,14 +29,26 @@ def _normalize_label(value: str | None) -> str:
     return re.sub(r"\s+", "_", value.strip().lower())
 
 
-def _provisional_severity(label: str) -> str:
-    if "fire" in label or "explosion" in label:
-        return "critical"
-    if "medical" in label or "collapse" in label or "seizure" in label:
-        return "high"
-    if "fight" in label or "injury" in label:
-        return "medium"
-    return "medium"
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _severity_from_detection(label: str, confidence: float, threshold: float) -> str:
+    if confidence < threshold:
+        return "low"
+    return severity_from_label(label)
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
 
 
 class IncidentOrchestrator:
@@ -44,12 +59,14 @@ class IncidentOrchestrator:
         publisher: EventPublisher,
         scheduler: AckScheduler,
         enricher: EnrichmentClient,
+        detector: DetectionClient,
         settings: AppSettings,
     ):
         self.repo = repo
         self.publisher = publisher
         self.scheduler = scheduler
         self.enricher = enricher
+        self.detector = detector
         self.settings = settings
 
     def parse_ingest_payload(self, raw: dict[str, Any]) -> IngestPayload:
@@ -58,6 +75,7 @@ class IncidentOrchestrator:
         timestamp = str(raw.get("timestamp", "")).strip()
         image_ref = raw.get("imageRef")
         image_base64 = raw.get("imageBase64")
+        image_mime_type = raw.get("imageMimeType")
         mock_label = raw.get("mockLabel")
         location = raw.get("location")
 
@@ -78,14 +96,36 @@ class IncidentOrchestrator:
             timestamp=timestamp,
             image_ref=image_ref,
             image_base64=image_base64,
+            image_mime_type=image_mime_type,
             mock_label=mock_label,
             location=location,
         )
 
     def ingest_http(self, raw: dict[str, Any]) -> dict[str, Any]:
         payload = self.parse_ingest_payload(raw)
-        label = _normalize_label(payload.mock_label)
-        severity = _provisional_severity(label)
+        detection = self.detector.detect(
+            {
+                "requestId": payload.request_id,
+                "cameraId": payload.camera_id,
+                "imageRef": payload.image_ref,
+                "imageBase64": payload.image_base64,
+                "imageMimeType": payload.image_mime_type,
+                "mockLabel": payload.mock_label,
+            }
+        )
+        detection_label = _normalize_label(str(detection.get("label") or payload.mock_label))
+        confidence = _safe_float(detection.get("confidence"), default=0.0)
+        required_skill = required_skill_from_detection(
+            label=detection_label,
+            confidence=confidence,
+            threshold=self.settings.vertex_detection_confidence_threshold,
+        )
+        severity = _severity_from_detection(
+            label=detection_label,
+            confidence=confidence,
+            threshold=self.settings.vertex_detection_confidence_threshold,
+        )
+        evidence_summary = str(detection.get("evidenceSummary") or "")
         now = utcnow()
         now_iso = isoformat_z(now)
 
@@ -94,9 +134,17 @@ class IncidentOrchestrator:
             "cameraId": payload.camera_id,
             "timestamp": payload.timestamp,
             "source": "edge_mock_camera",
-            "classification": {"provisional": label},
+            "classification": {"provisional": normalize_detection_label(detection_label)},
             "severity": {"provisional": severity},
-            "confidence": 0.72,
+            "requiredSkill": required_skill,
+            "readyForAllocation": True,
+            "assignmentPhase": ASSIGNMENT_PHASE_INITIAL,
+            "aiDetection": {
+                "label": normalize_detection_label(detection_label),
+                "confidence": confidence,
+                "evidenceSummary": evidence_summary,
+            },
+            "confidence": confidence,
             "location": payload.location,
         }
         enrich_event = {
@@ -105,7 +153,8 @@ class IncidentOrchestrator:
             "timestamp": payload.timestamp,
             "imageRef": payload.image_ref,
             "imageBase64": payload.image_base64,
-            "provisionalClassification": label,
+            "imageMimeType": payload.image_mime_type,
+            "provisionalClassification": normalize_detection_label(detection_label),
             "provisionalSeverity": severity,
         }
 
@@ -116,8 +165,10 @@ class IncidentOrchestrator:
             "requestId": payload.request_id,
             "acceptedAt": now_iso,
             "published": True,
-            "classification": label,
+            "classification": normalize_detection_label(detection_label),
             "severity": severity,
+            "requiredSkill": required_skill,
+            "confidence": confidence,
             "topics": [self.settings.fast_topic, self.settings.enrich_topic],
         }
 
@@ -125,17 +176,115 @@ class IncidentOrchestrator:
         request_id = str(event["requestId"])
         now_iso = isoformat_z(utcnow())
         incident, _ = self.repo.upsert_fast_incident(request_id, event, now_iso)
+        return incident
 
-        if self._is_terminal(incident):
+    def allocate_initial_assignment(self, *, incident_id: str) -> dict[str, Any]:
+        incident = self.repo.get_incident(incident_id)
+        if not incident:
+            return {"status": "missing", "incidentId": incident_id}
+        if incident.get("assignedResponderId"):
             return incident
-        if incident.get("status") == INCIDENT_STATUS_ASSIGNED and incident.get("ackDeadline"):
+        if safe_get(incident, "allocation", "status") in {"processing", "completed"}:
             return incident
-        if incident.get("status") == INCIDENT_STATUS_ACKNOWLEDGED:
+        if not bool(incident.get("readyForAllocation", False)):
             return incident
-        if int(incident.get("assignmentAttempt") or 0) > 0:
+        if incident.get("status") != INCIDENT_STATUS_DETECTED:
+            return incident
+        if str(incident.get("assignmentPhase") or "") != ASSIGNMENT_PHASE_INITIAL:
             return incident
 
-        return self._assign_or_escalate(incident_id=request_id, attempt=1)
+        required_skill = str(incident.get("requiredSkill") or "general")
+        severity = safe_get(incident, "severity", "provisional") or "low"
+        confidence = _safe_float(safe_get(incident, "aiDetection", "confidence"), default=0.0)
+        responders = self.repo.list_responders()
+        evaluated_at = isoformat_z(utcnow())
+        scored_qualified = [
+            score_responder(
+                responder=responder,
+                incident_location=incident.get("location"),
+                required_skill=required_skill,
+                severity=severity,
+            )
+            for responder in responders
+        ]
+        ranked_qualified = sorted([item for item in scored_qualified if item.score > 0], key=lambda item: item.score, reverse=True)
+
+        fallback = False
+        selected_id: str | None = None
+        candidate_queue: list[str] = []
+        scored_for_diagnostics = scored_qualified
+        if ranked_qualified:
+            selected_id = ranked_qualified[0].uid
+            candidate_queue = [item.uid for item in ranked_qualified]
+            score_reason = "qualified_best_score"
+        else:
+            scored_fallback = [
+                score_responder(
+                    responder=responder,
+                    incident_location=incident.get("location"),
+                    required_skill=required_skill,
+                    severity=severity,
+                    allow_fallback=True,
+                )
+                for responder in responders
+            ]
+            scored_for_diagnostics = scored_fallback
+            ranked_fallback = sorted([item for item in scored_fallback if item.score > 0], key=lambda item: item.score, reverse=True)
+            if ranked_fallback:
+                fallback = True
+                selected_id = ranked_fallback[0].uid
+                candidate_queue = [item.uid for item in ranked_fallback]
+                score_reason = "fallback_nearest_available"
+            else:
+                score_reason = "no_available_responder"
+
+        top_candidates = []
+        sorted_diag = sorted(scored_for_diagnostics, key=lambda item: item.score, reverse=True)
+        for item in sorted_diag[:3]:
+            candidate: dict[str, Any] = {
+                "id": item.uid,
+                "score": round(item.score, 8),
+                "distanceMeters": None if item.distance_m == float("inf") else round(item.distance_m, 2),
+                "qualified": bool(item.skill_match),
+            }
+            if item.score <= 0:
+                candidate["rejectedReason"] = item.reason
+            top_candidates.append(candidate)
+
+        retry_eligible = None
+        allocation_status = "completed" if selected_id else ALLOCATION_STATUS_NO_CANDIDATE
+        now = utcnow()
+        ack_deadline_iso = None
+        if selected_id:
+            ack_deadline_iso = isoformat_z(now + timedelta(seconds=self.settings.ack_timeout_seconds))
+        if not selected_id:
+            retry_eligible = isoformat_z(utcnow() + timedelta(seconds=self.settings.no_candidate_retry_seconds))
+
+        result = self.repo.allocate_initial_assignment(
+            incident_id=incident_id,
+            selected_responder_id=selected_id,
+            candidate_queue=candidate_queue,
+            fallback=fallback,
+            score_reason=score_reason,
+            top_candidates=top_candidates,
+            input_snapshot={
+                "respondersEvaluated": len(responders),
+                "requiredSkill": required_skill,
+                "severity": severity,
+                "confidence": confidence,
+                "evaluatedAt": evaluated_at,
+            },
+            now_iso=isoformat_z(now),
+            ack_deadline_iso=ack_deadline_iso,
+            retry_eligible_at_iso=retry_eligible,
+            allocation_status=allocation_status,
+        )
+        if result.get("status") == INCIDENT_STATUS_ASSIGNED and ack_deadline_iso:
+            run_at = _parse_iso(ack_deadline_iso) or utcnow()
+            self.scheduler.schedule_ack_check(incident_id=incident_id, assignment_attempt=1, run_at=run_at)
+        if result.get("allocation", {}).get("status") == ALLOCATION_STATUS_NO_CANDIDATE and retry_eligible:
+            self.scheduler.schedule_ack_check(incident_id=incident_id, assignment_attempt=0, run_at=_parse_iso(retry_eligible) or utcnow())
+        return result
 
     def handle_enrichment_event(self, event: dict[str, Any]) -> dict[str, Any]:
         request_id = str(event["requestId"])
@@ -158,6 +307,14 @@ class IncidentOrchestrator:
             return {"status": "already_acknowledged", "incidentId": incident_id}
         if self._is_terminal(incident):
             return {"status": "terminal", "incidentId": incident_id}
+
+        if safe_get(incident, "allocation", "status") == ALLOCATION_STATUS_NO_CANDIDATE:
+            retry_at = _parse_iso(incident.get("retryEligibleAt"))
+            if retry_at and utcnow() < retry_at:
+                return {"status": "not_due", "incidentId": incident_id, "retryEligibleAt": incident.get("retryEligibleAt")}
+            self.repo.mark_retry_phase(incident_id, now_iso=isoformat_z(utcnow()))
+            current_attempt = int(incident.get("assignmentAttempt") or 0)
+            return self._assign_or_escalate(incident_id=incident_id, attempt=max(1, current_attempt + 1))
 
         current_attempt = int(incident.get("assignmentAttempt") or 0)
         if current_attempt != assignment_attempt:
@@ -216,6 +373,7 @@ class IncidentOrchestrator:
             assignment_attempt=attempt,
             ack_deadline_iso=isoformat_z(ack_deadline),
             now_iso=isoformat_z(now),
+            assignment_phase=ASSIGNMENT_PHASE_RETRY,
         )
         self.scheduler.schedule_ack_check(
             incident_id=incident_id,
@@ -225,12 +383,9 @@ class IncidentOrchestrator:
         return updated
 
     def _build_candidate_queue(self, incident: dict[str, Any]) -> list[str]:
-        responders = self.repo.list_available_responders()
-        label = safe_get(incident, "classification", "enriched") or safe_get(
-            incident, "classification", "provisional"
-        )
-        severity = safe_get(incident, "severity", "enriched") or safe_get(incident, "severity", "provisional")
-        required_skill = required_skill_from_label(label)
+        responders = self.repo.list_responders()
+        severity = safe_get(incident, "severity", "provisional") or "low"
+        required_skill = str(incident.get("requiredSkill") or "general")
         incident_location = incident.get("location")
 
         scored = [
@@ -243,6 +398,18 @@ class IncidentOrchestrator:
             for responder in responders
         ]
         ranked = sorted([item for item in scored if item.score > 0], key=lambda item: item.score, reverse=True)
+        if not ranked:
+            fallback_scored = [
+                score_responder(
+                    responder=responder,
+                    incident_location=incident_location,
+                    required_skill=required_skill,
+                    severity=severity,
+                    allow_fallback=True,
+                )
+                for responder in responders
+            ]
+            ranked = sorted([item for item in fallback_scored if item.score > 0], key=lambda item: item.score, reverse=True)
         return [item.uid for item in ranked]
 
     @staticmethod

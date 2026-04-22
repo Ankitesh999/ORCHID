@@ -10,9 +10,12 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from .models import (
+    ALLOCATION_STATUS_COMPLETED,
+    ALLOCATION_STATUS_PROCESSING,
     ENRICHMENT_COMPLETED,
     INCIDENT_STATUS_ACKNOWLEDGED,
     INCIDENT_STATUS_ASSIGNED,
+    INCIDENT_STATUS_DETECTED,
     INCIDENT_STATUS_UNACKED_ESCALATION,
     isoformat_z,
 )
@@ -28,7 +31,27 @@ class IncidentRepository(Protocol):
     def get_incident(self, incident_id: str) -> dict[str, Any] | None:
         ...
 
-    def list_available_responders(self) -> list[dict[str, Any]]:
+    def list_responders(self) -> list[dict[str, Any]]:
+        ...
+
+    def allocate_initial_assignment(
+        self,
+        *,
+        incident_id: str,
+        selected_responder_id: str | None,
+        candidate_queue: list[str],
+        fallback: bool,
+        score_reason: str,
+        top_candidates: list[dict[str, Any]],
+        input_snapshot: dict[str, Any],
+        now_iso: str,
+        ack_deadline_iso: str | None,
+        retry_eligible_at_iso: str | None,
+        allocation_status: str,
+    ) -> dict[str, Any]:
+        ...
+
+    def mark_retry_phase(self, incident_id: str, now_iso: str) -> dict[str, Any] | None:
         ...
 
     def record_assignment(
@@ -40,6 +63,7 @@ class IncidentRepository(Protocol):
         assignment_attempt: int,
         ack_deadline_iso: str,
         now_iso: str,
+        assignment_phase: str,
     ) -> dict[str, Any]:
         ...
 
@@ -71,6 +95,11 @@ class AckScheduler(Protocol):
 
 class EnrichmentClient(Protocol):
     def enrich(self, payload: dict[str, Any]) -> dict[str, Any]:
+        ...
+
+
+class DetectionClient(Protocol):
+    def detect(self, payload: dict[str, Any]) -> dict[str, Any]:
         ...
 
 
@@ -113,7 +142,15 @@ class FirestoreIncidentRepository:
                     "source": payload.get("source", "edge_mock_camera"),
                     "classification.provisional": payload["classification"]["provisional"],
                     "severity.provisional": payload["severity"]["provisional"],
-                    "enrichmentState": current.get("enrichmentState", "pending"),
+                    "requiredSkill": payload.get("requiredSkill", current.get("requiredSkill", "general")),
+                    "readyForAllocation": payload.get("readyForAllocation", current.get("readyForAllocation", True)),
+                    "assignmentPhase": payload.get("assignmentPhase", current.get("assignmentPhase", "initial")),
+                    "aiDetection": {
+                        "label": payload.get("aiDetection", {}).get("label"),
+                        "confidence": payload.get("aiDetection", {}).get("confidence"),
+                        "evidenceSummary": payload.get("aiDetection", {}).get("evidenceSummary"),
+                    },
+                    "confidence.provisional": payload.get("confidence"),
                     "location": payload.get("location"),
                 }
                 txn.set(doc_ref, updates, merge=True)
@@ -123,12 +160,20 @@ class FirestoreIncidentRepository:
 
             doc = {
                 "requestId": request_id,
-                "status": "detected",
+                "status": INCIDENT_STATUS_DETECTED,
                 "cameraId": payload["cameraId"],
                 "source": payload.get("source", "edge_mock_camera"),
                 "classification": {"provisional": payload["classification"]["provisional"], "enriched": None},
                 "severity": {"provisional": payload["severity"]["provisional"], "enriched": None},
                 "confidence": {"provisional": payload.get("confidence"), "enriched": None},
+                "requiredSkill": payload.get("requiredSkill", "general"),
+                "readyForAllocation": payload.get("readyForAllocation", True),
+                "assignmentPhase": payload.get("assignmentPhase", "initial"),
+                "aiDetection": {
+                    "label": payload.get("aiDetection", {}).get("label"),
+                    "confidence": payload.get("aiDetection", {}).get("confidence"),
+                    "evidenceSummary": payload.get("aiDetection", {}).get("evidenceSummary"),
+                },
                 "summary": None,
                 "location": payload.get("location"),
                 "candidateQueue": [],
@@ -136,6 +181,15 @@ class FirestoreIncidentRepository:
                 "assignedResponderId": None,
                 "ackDeadline": None,
                 "acknowledgedAt": None,
+                "retryEligibleAt": None,
+                "allocation": {
+                    "status": None,
+                    "assignedAt": None,
+                    "fallback": False,
+                    "topCandidates": [],
+                    "scoreReason": None,
+                    "inputSnapshot": None,
+                },
                 "enrichmentState": "pending",
                 "createdAt": now_iso,
                 "updatedAt": now_iso,
@@ -151,14 +205,102 @@ class FirestoreIncidentRepository:
             return None
         return snapshot.to_dict() or {}
 
-    def list_available_responders(self) -> list[dict[str, Any]]:
+    def list_responders(self) -> list[dict[str, Any]]:
         responders: list[dict[str, Any]] = []
-        query = self._db.collection("users").where("role", "==", "responder").where("availability", "==", True)
+        query = self._db.collection("users").where("role", "==", "responder")
         for snap in query.stream():
             data = snap.to_dict() or {}
             data["uid"] = snap.id
             responders.append(data)
         return responders
+
+    def allocate_initial_assignment(
+        self,
+        *,
+        incident_id: str,
+        selected_responder_id: str | None,
+        candidate_queue: list[str],
+        fallback: bool,
+        score_reason: str,
+        top_candidates: list[dict[str, Any]],
+        input_snapshot: dict[str, Any],
+        now_iso: str,
+        ack_deadline_iso: str | None,
+        retry_eligible_at_iso: str | None,
+        allocation_status: str,
+    ) -> dict[str, Any]:
+        firestore = self._firestore
+        doc_ref = self._db.collection("incidents").document(incident_id)
+        transaction = self._db.transaction()
+
+        @firestore.transactional
+        def _txn(txn):
+            snap = doc_ref.get(transaction=txn)
+            if not snap.exists:
+                return {"status": "missing", "incidentId": incident_id}
+            current = snap.to_dict() or {}
+
+            if current.get("assignedResponderId"):
+                return current
+
+            allocation = current.get("allocation") or {}
+            current_allocation_status = allocation.get("status")
+            if current_allocation_status in {ALLOCATION_STATUS_COMPLETED, ALLOCATION_STATUS_PROCESSING}:
+                return current
+
+            if current.get("status") != INCIDENT_STATUS_DETECTED:
+                return current
+            if not bool(current.get("readyForAllocation")):
+                return current
+            if str(current.get("assignmentPhase") or "") != "initial":
+                return current
+
+            txn.set(doc_ref, {"allocation.status": ALLOCATION_STATUS_PROCESSING, "updatedAt": now_iso}, merge=True)
+
+            updates: dict[str, Any] = {
+                "updatedAt": now_iso,
+                "allocation.status": allocation_status,
+                "allocation.fallback": fallback,
+                "allocation.topCandidates": top_candidates,
+                "allocation.scoreReason": score_reason,
+                "allocation.inputSnapshot": input_snapshot,
+                "allocation.assignedAt": now_iso if selected_responder_id else None,
+            }
+
+            if selected_responder_id:
+                updates.update(
+                    {
+                        "status": INCIDENT_STATUS_ASSIGNED,
+                        "assignedResponderId": selected_responder_id,
+                        "candidateQueue": candidate_queue,
+                        "assignmentAttempt": max(1, int(current.get("assignmentAttempt") or 0)),
+                        "ackDeadline": ack_deadline_iso,
+                    }
+                )
+            else:
+                updates.update(
+                    {
+                        "status": INCIDENT_STATUS_DETECTED,
+                        "assignedResponderId": None,
+                        "ackDeadline": None,
+                        "retryEligibleAt": retry_eligible_at_iso,
+                        "assignmentPhase": "retry",
+                    }
+                )
+
+            txn.set(doc_ref, updates, merge=True)
+            merged = deepcopy(current)
+            _merge_nested(merged, updates)
+            return merged
+
+        return _txn(transaction)
+
+    def mark_retry_phase(self, incident_id: str, now_iso: str) -> dict[str, Any] | None:
+        doc_ref = self._db.collection("incidents").document(incident_id)
+        if not doc_ref.get().exists:
+            return None
+        doc_ref.set({"assignmentPhase": "retry", "updatedAt": now_iso}, merge=True)
+        return self.get_incident(incident_id)
 
     def record_assignment(
         self,
@@ -169,6 +311,7 @@ class FirestoreIncidentRepository:
         assignment_attempt: int,
         ack_deadline_iso: str,
         now_iso: str,
+        assignment_phase: str,
     ) -> dict[str, Any]:
         doc_ref = self._db.collection("incidents").document(incident_id)
         updates = {
@@ -177,11 +320,14 @@ class FirestoreIncidentRepository:
             "candidateQueue": candidate_queue,
             "assignmentAttempt": assignment_attempt,
             "ackDeadline": ack_deadline_iso,
+            "assignmentPhase": assignment_phase,
+            "allocation.status": ALLOCATION_STATUS_COMPLETED,
+            "allocation.assignedAt": now_iso,
+            "retryEligibleAt": None,
             "updatedAt": now_iso,
         }
         doc_ref.set(updates, merge=True)
-        incident = self.get_incident(incident_id) or {}
-        return incident
+        return self.get_incident(incident_id) or {}
 
     def mark_unacked_escalation(self, incident_id: str, now_iso: str, reason: str) -> dict[str, Any]:
         updates = {
@@ -309,6 +455,7 @@ class GeminiEnrichmentClient:
     def enrich(self, payload: dict[str, Any]) -> dict[str, Any]:
         provisional = payload.get("provisionalClassification") or "possible_incident"
         provisional_severity = payload.get("provisionalSeverity") or "medium"
+        image_mime_type = payload.get("imageMimeType") or "image/jpeg"
         if not self._settings.enable_gemini:
             return {
                 "classification": provisional,
@@ -319,7 +466,7 @@ class GeminiEnrichmentClient:
 
         try:
             from google import genai
-        except Exception as exc:  # pragma: no cover - runtime guard
+        except Exception as exc:  # pragma: no cover
             return {
                 "classification": provisional,
                 "severity": provisional_severity,
@@ -338,10 +485,10 @@ class GeminiEnrichmentClient:
         image_ref = payload.get("imageRef")
         image_base64 = payload.get("imageBase64")
         if image_ref:
-            parts.append(genai.types.Part.from_uri(file_uri=image_ref, mime_type="image/jpeg"))
+            parts.append(genai.types.Part.from_uri(file_uri=image_ref, mime_type=image_mime_type))
         elif image_base64:
             image_bytes = base64.b64decode(image_base64)
-            parts.append(genai.types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
+            parts.append(genai.types.Part.from_bytes(data=image_bytes, mime_type=image_mime_type))
 
         try:
             client = genai.Client(vertexai=True, project=self._settings.project_id, location=self._settings.gemini_location)
@@ -354,13 +501,72 @@ class GeminiEnrichmentClient:
                 "confidence": float(parsed.get("confidence", 0.5)),
                 "summary": parsed.get("summary", "Gemini enrichment completed."),
             }
-        except Exception as exc:  # pragma: no cover - runtime guard
+        except Exception as exc:  # pragma: no cover
             logger.exception("Gemini enrichment failed")
             return {
                 "classification": provisional,
                 "severity": provisional_severity,
                 "confidence": 0.5,
                 "summary": "Gemini request failed; fallback applied.",
+                "error": str(exc),
+            }
+
+
+class VertexDetectionClient:
+    def __init__(self, settings: AppSettings):
+        self._settings = settings
+
+    def detect(self, payload: dict[str, Any]) -> dict[str, Any]:
+        mock_label = str(payload.get("mockLabel") or "possible_medical_distress")
+        if not self._settings.enable_vertex_detection:
+            return {
+                "label": mock_label,
+                "confidence": 0.5,
+                "evidenceSummary": "Vertex detection disabled; using mock label.",
+            }
+
+        try:
+            from google import genai
+        except Exception as exc:  # pragma: no cover
+            return {
+                "label": mock_label,
+                "confidence": 0.5,
+                "evidenceSummary": "Vertex SDK unavailable; using mock label.",
+                "error": f"sdk_unavailable:{exc}",
+            }
+
+        prompt = (
+            "Classify this scene for emergency dispatch. "
+            "Return strict JSON with keys label, confidence, evidenceSummary. "
+            "Label should be short snake_case. confidence must be 0..1."
+        )
+        parts: list[Any] = [prompt]
+        image_mime_type = payload.get("imageMimeType") or "image/jpeg"
+        image_ref = payload.get("imageRef")
+        image_base64 = payload.get("imageBase64")
+        if image_ref:
+            parts.append(genai.types.Part.from_uri(file_uri=image_ref, mime_type=image_mime_type))
+        elif image_base64:
+            image_bytes = base64.b64decode(image_base64)
+            parts.append(genai.types.Part.from_bytes(data=image_bytes, mime_type=image_mime_type))
+
+        try:
+            client = genai.Client(vertexai=True, project=self._settings.project_id, location=self._settings.gemini_location)
+            response = client.models.generate_content(model=self._settings.vertex_detection_model, contents=parts)
+            raw_text = (response.text or "").strip()
+            parsed = json.loads(raw_text) if raw_text.startswith("{") else {}
+            confidence = float(parsed.get("confidence", 0.5))
+            return {
+                "label": parsed.get("label", mock_label),
+                "confidence": confidence,
+                "evidenceSummary": parsed.get("evidenceSummary", "Vertex detection completed."),
+            }
+        except Exception as exc:  # pragma: no cover
+            logger.exception("Vertex detection failed")
+            return {
+                "label": mock_label,
+                "confidence": 0.5,
+                "evidenceSummary": "Vertex request failed; using mock label.",
                 "error": str(exc),
             }
 
@@ -383,17 +589,23 @@ class InMemoryIncidentRepository:
                 incident["updatedAt"] = now_iso
                 incident["classification"]["provisional"] = payload["classification"]["provisional"]
                 incident["severity"]["provisional"] = payload["severity"]["provisional"]
+                incident["requiredSkill"] = payload.get("requiredSkill", incident.get("requiredSkill", "general"))
+                incident["aiDetection"] = deepcopy(payload.get("aiDetection") or incident.get("aiDetection"))
                 incident["location"] = payload.get("location")
                 return deepcopy(incident), False
 
             doc = {
                 "requestId": request_id,
-                "status": "detected",
+                "status": INCIDENT_STATUS_DETECTED,
                 "cameraId": payload["cameraId"],
                 "source": payload.get("source", "edge_mock_camera"),
                 "classification": {"provisional": payload["classification"]["provisional"], "enriched": None},
                 "severity": {"provisional": payload["severity"]["provisional"], "enriched": None},
                 "confidence": {"provisional": payload.get("confidence"), "enriched": None},
+                "requiredSkill": payload.get("requiredSkill", "general"),
+                "readyForAllocation": payload.get("readyForAllocation", True),
+                "assignmentPhase": payload.get("assignmentPhase", "initial"),
+                "aiDetection": deepcopy(payload.get("aiDetection") or {}),
                 "summary": None,
                 "location": payload.get("location"),
                 "candidateQueue": [],
@@ -401,6 +613,15 @@ class InMemoryIncidentRepository:
                 "assignedResponderId": None,
                 "ackDeadline": None,
                 "acknowledgedAt": None,
+                "retryEligibleAt": None,
+                "allocation": {
+                    "status": None,
+                    "assignedAt": None,
+                    "fallback": False,
+                    "topCandidates": [],
+                    "scoreReason": None,
+                    "inputSnapshot": None,
+                },
                 "enrichmentState": "pending",
                 "createdAt": now_iso,
                 "updatedAt": now_iso,
@@ -413,15 +634,80 @@ class InMemoryIncidentRepository:
             incident = self._incidents.get(incident_id)
             return deepcopy(incident) if incident else None
 
-    def list_available_responders(self) -> list[dict[str, Any]]:
+    def list_responders(self) -> list[dict[str, Any]]:
         with self._lock:
             responders = []
             for uid, user in self._users.items():
-                if user.get("role") == "responder" and user.get("availability"):
+                if user.get("role") == "responder":
                     item = deepcopy(user)
                     item["uid"] = uid
                     responders.append(item)
             return responders
+
+    def allocate_initial_assignment(
+        self,
+        *,
+        incident_id: str,
+        selected_responder_id: str | None,
+        candidate_queue: list[str],
+        fallback: bool,
+        score_reason: str,
+        top_candidates: list[dict[str, Any]],
+        input_snapshot: dict[str, Any],
+        now_iso: str,
+        ack_deadline_iso: str | None,
+        retry_eligible_at_iso: str | None,
+        allocation_status: str,
+    ) -> dict[str, Any]:
+        with self._lock:
+            incident = self._incidents.get(incident_id)
+            if not incident:
+                return {"status": "missing", "incidentId": incident_id}
+            if incident.get("assignedResponderId"):
+                return deepcopy(incident)
+            if (incident.get("allocation") or {}).get("status") in {ALLOCATION_STATUS_COMPLETED, ALLOCATION_STATUS_PROCESSING}:
+                return deepcopy(incident)
+            if incident.get("status") != INCIDENT_STATUS_DETECTED:
+                return deepcopy(incident)
+            if not bool(incident.get("readyForAllocation")):
+                return deepcopy(incident)
+            if str(incident.get("assignmentPhase") or "") != "initial":
+                return deepcopy(incident)
+
+            incident["allocation"]["status"] = ALLOCATION_STATUS_PROCESSING
+            incident["updatedAt"] = now_iso
+
+            incident["allocation"]["status"] = allocation_status
+            incident["allocation"]["fallback"] = fallback
+            incident["allocation"]["topCandidates"] = deepcopy(top_candidates)
+            incident["allocation"]["scoreReason"] = score_reason
+            incident["allocation"]["inputSnapshot"] = deepcopy(input_snapshot)
+            incident["allocation"]["assignedAt"] = now_iso if selected_responder_id else None
+
+            if selected_responder_id:
+                incident["status"] = INCIDENT_STATUS_ASSIGNED
+                incident["assignedResponderId"] = selected_responder_id
+                incident["candidateQueue"] = deepcopy(candidate_queue)
+                incident["assignmentAttempt"] = max(1, int(incident.get("assignmentAttempt") or 0))
+                incident["ackDeadline"] = ack_deadline_iso
+            else:
+                incident["status"] = INCIDENT_STATUS_DETECTED
+                incident["assignedResponderId"] = None
+                incident["ackDeadline"] = None
+                incident["retryEligibleAt"] = retry_eligible_at_iso
+                incident["assignmentPhase"] = "retry"
+
+            incident["updatedAt"] = now_iso
+            return deepcopy(incident)
+
+    def mark_retry_phase(self, incident_id: str, now_iso: str) -> dict[str, Any] | None:
+        with self._lock:
+            incident = self._incidents.get(incident_id)
+            if not incident:
+                return None
+            incident["assignmentPhase"] = "retry"
+            incident["updatedAt"] = now_iso
+            return deepcopy(incident)
 
     def record_assignment(
         self,
@@ -432,6 +718,7 @@ class InMemoryIncidentRepository:
         assignment_attempt: int,
         ack_deadline_iso: str,
         now_iso: str,
+        assignment_phase: str,
     ) -> dict[str, Any]:
         with self._lock:
             incident = self._incidents[incident_id]
@@ -440,6 +727,10 @@ class InMemoryIncidentRepository:
             incident["candidateQueue"] = deepcopy(candidate_queue)
             incident["assignmentAttempt"] = assignment_attempt
             incident["ackDeadline"] = ack_deadline_iso
+            incident["assignmentPhase"] = assignment_phase
+            incident["allocation"]["status"] = ALLOCATION_STATUS_COMPLETED
+            incident["allocation"]["assignedAt"] = now_iso
+            incident["retryEligibleAt"] = None
             incident["updatedAt"] = now_iso
             return deepcopy(incident)
 
@@ -531,4 +822,17 @@ class InMemoryEnrichmentClient:
             "severity": payload.get("provisionalSeverity", "medium"),
             "confidence": 0.83,
             "summary": "Async enrichment completed.",
+        }
+
+
+class InMemoryDetectionClient:
+    def __init__(self):
+        self.calls: list[dict[str, Any]] = []
+
+    def detect(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(deepcopy(payload))
+        return {
+            "label": payload.get("mockLabel") or "possible_medical_distress",
+            "confidence": 0.72,
+            "evidenceSummary": "Mock detection executed.",
         }

@@ -32,9 +32,13 @@ class AppSettings:
     enrich_topic: str
     ack_timeout_seconds: int
     max_assignment_attempts: int
+    no_candidate_retry_seconds: int
     ack_callback_url: str | None
     ack_queue_id: str
     ack_tasks_service_account_email: str | None
+    vertex_detection_model: str
+    vertex_detection_confidence_threshold: float
+    enable_vertex_detection: bool
     gemini_model: str
     enable_gemini: bool
     gemini_location: str
@@ -54,9 +58,15 @@ def load_settings() -> AppSettings:
         enrich_topic=_env("ENRICH_TOPIC_ID", "incident.enrich.request.v1") or "incident.enrich.request.v1",
         ack_timeout_seconds=_env_int("ACK_TIMEOUT_SECONDS", 15),
         max_assignment_attempts=_env_int("MAX_ASSIGNMENT_ATTEMPTS", 3),
+        no_candidate_retry_seconds=_env_int("NO_CANDIDATE_RETRY_SECONDS", 30),
         ack_callback_url=_env("ACK_CALLBACK_URL"),
         ack_queue_id=_env("ACK_QUEUE_ID", "incident-ack-deadline") or "incident-ack-deadline",
         ack_tasks_service_account_email=_env("ACK_TASKS_SERVICE_ACCOUNT_EMAIL"),
+        vertex_detection_model=_env("VERTEX_DETECTION_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash",
+        vertex_detection_confidence_threshold=float(
+            _env("VERTEX_DETECTION_CONFIDENCE_THRESHOLD", "0.6") or "0.6"
+        ),
+        enable_vertex_detection=_env_bool("ENABLE_VERTEX_DETECTION", True),
         gemini_model=_env("GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash",
         enable_gemini=_env_bool("ENABLE_GEMINI", True),
         gemini_location=_env("GEMINI_LOCATION", "us-central1") or "us-central1",

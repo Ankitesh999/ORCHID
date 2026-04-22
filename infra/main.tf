@@ -5,10 +5,19 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 5.43"
     }
+    google-beta = {
+      source  = "hashicorp/google-beta"
+      version = "~> 5.43"
+    }
   }
 }
 
 provider "google" {
+  project = var.project_id
+  region  = var.region
+}
+
+provider "google-beta" {
   project = var.project_id
   region  = var.region
 }
@@ -36,7 +45,7 @@ resource "google_project_service" "enabled" {
 }
 
 resource "google_firebase_project" "default" {
-  provider   = google
+  provider   = google-beta
   project    = var.project_id
   depends_on = [google_project_service.enabled]
 }
