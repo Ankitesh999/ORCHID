@@ -9,9 +9,20 @@ service cloud.firestore {
       return signedIn() ? request.auth.token.role : null;
     }
 
+    function responderPresenceUpdate(uid) {
+      return request.auth.uid == uid
+        && role() == "responder"
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "lastKnownLocation",
+          "updatedAt",
+          "availability"
+        ]);
+    }
+
     match /users/{uid} {
       allow read: if signedIn() && (role() == "admin" || request.auth.uid == uid);
-      allow write: if signedIn() && role() == "admin";
+      allow create, delete: if signedIn() && role() == "admin";
+      allow update: if signedIn() && (role() == "admin" || responderPresenceUpdate(uid));
     }
 
     match /incidents/{incidentId} {

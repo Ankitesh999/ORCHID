@@ -31,6 +31,7 @@ def build_settings() -> AppSettings:
         enable_vertex_detection=False,
         gemini_model="gemini-2.5-flash",
         enable_gemini=False,
+        enable_tactical_reasoning=False,
         gemini_location="us-central1",
         google_api_key=None,
     )

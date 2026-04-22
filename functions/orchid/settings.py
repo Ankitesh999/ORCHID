@@ -41,6 +41,7 @@ class AppSettings:
     enable_vertex_detection: bool
     gemini_model: str
     enable_gemini: bool
+    enable_tactical_reasoning: bool
     gemini_location: str
     google_api_key: str | None
 
@@ -69,6 +70,7 @@ def load_settings() -> AppSettings:
         enable_vertex_detection=_env_bool("ENABLE_VERTEX_DETECTION", True),
         gemini_model=_env("GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash",
         enable_gemini=_env_bool("ENABLE_GEMINI", True),
+        enable_tactical_reasoning=_env_bool("ENABLE_TACTICAL_REASONING", False),
         gemini_location=_env("GEMINI_LOCATION", "us-central1") or "us-central1",
         google_api_key=_env("GOOGLE_API_KEY"),
     )

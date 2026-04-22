@@ -26,6 +26,17 @@ export type Incident = {
     confidence?: number;
     evidenceSummary?: string;
   };
+  location?: {
+    lat?: number;
+    lng?: number;
+  };
+  tacticalReasoning?: {
+    safeApproach?: string;
+    hazards?: string[];
+    victimCount?: number;
+    recommendedEquipment?: string[];
+    priorityActions?: string[];
+  };
   allocation?: {
     status?: "processing" | "completed" | "no_candidate" | string | null;
     assignedAt?: string | null;

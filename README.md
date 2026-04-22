@@ -1,11 +1,16 @@
-# ORCHID MVP Phase 2 (Implemented)
+# ORCHID MVP Phase 3 (Implemented)
 
-This workspace now includes a Phase 2 architecture with:
+This workspace includes the Phase 2 core orchestration plus Phase 3 demo-facing experiences:
 - Vertex AI-backed detection at ingest, normalized through deterministic rule mapping.
 - Transactional Firestore onCreate initial allocation with explicit allocation states.
 - Retry engine ownership for reassignment and `no_candidate` recovery.
 - Async Gemini enrichment that does not alter assignment-critical fields.
-- Next.js dashboard diagnostics for AI evidence and allocation explainability.
+- Next.js admin dashboard diagnostics for AI evidence and allocation explainability.
+- Mobile-first responder web route with real-time assigned tasks and one-tap acceptance.
+- Google Maps campus routing in responder view with indoor guidance mock note.
+- Dashboard drag-and-drop responder simulation pins for live coordination demo.
+- Offline acceptance queue and replay for failover demonstration.
+- Optional tactical reasoning field support (feature-flagged) in enrichment payload.
 
 ## Repo Layout
 
@@ -16,7 +21,7 @@ This workspace now includes a Phase 2 architecture with:
 
 ## Cloud Functions
 
-Functions entrypoints are in [functions/main.py](/a:/solution challenge 2026/Dev/functions/main.py).
+Functions entrypoints are in `functions/main.py`.
 
 - `ingest_incident` (HTTP `POST`)
   - Input: `requestId`, `cameraId`, `timestamp`, `imageRef|imageBase64`, optional `imageMimeType`, optional `mockLabel`, `location`
@@ -32,6 +37,7 @@ Functions entrypoints are in [functions/main.py](/a:/solution challenge 2026/Dev
 - `enrich_incident` (Pub/Sub)
   - Calls Gemini asynchronously
   - Patches incident with enriched classification/severity/summary
+  - Optionally writes `tacticalReasoning` object when `ENABLE_TACTICAL_REASONING=true`
 - `check_ack_deadline` (HTTP `POST`)
   - Triggered by Cloud Tasks
   - Owns reassignment on missed ack up to 3 attempts, then escalates
@@ -71,6 +77,19 @@ Set env vars:
 - `VERTEX_DETECTION_CONFIDENCE_THRESHOLD=0.6`
 - `ENABLE_GEMINI=true`
 - `GEMINI_MODEL=gemini-2.5-flash`
+- `ENABLE_TACTICAL_REASONING=false`
+
+### Tactical reasoning flag
+
+- `ENABLE_TACTICAL_REASONING=false` (default): only base enrichment fields are written.
+- `ENABLE_TACTICAL_REASONING=true`: enrichment may include advisory tactical fields:
+  - `safeApproach`
+  - `hazards[]`
+  - `victimCount`
+  - `recommendedEquipment[]`
+  - `priorityActions[]`
+
+These fields are advisory and do not modify assignment-critical state.
 
 Deploy commands:
 
@@ -107,6 +126,52 @@ copy .env.example .env.local
 npm.cmd install
 npm.cmd run build
 ```
+
+Set these variables in `dashboard/.env.local`:
+
+```env
+NEXT_PUBLIC_FIREBASE_API_KEY=...
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=...
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=...
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=...
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=...
+NEXT_PUBLIC_FIREBASE_APP_ID=...
+NEXT_PUBLIC_ACK_FUNCTION_URL=https://REGION-PROJECT.cloudfunctions.net/ack_incident
+NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=...
+```
+
+### Routes
+
+- Admin SOC dashboard: `/`
+- Responder mobile app: `/responder`
+
+### Firestore rules (Phase 3)
+
+- Admin retains full write authority for `incidents`.
+- Responders can update only their own presence fields in `users/{uid}`:
+  - `lastKnownLocation`
+  - `updatedAt`
+  - `availability`
+
+All other user mutations stay admin-only.
+
+## Demo Runbook: Simulated Failover
+
+1. Sign in to `/` as admin and open `/responder` as a responder user on another device/browser.
+2. Trigger incidents with `scripts/mock_camera.py`.
+3. Confirm assignment appears on responder page.
+4. Disable network on responder device (DevTools Network -> Offline).
+5. Press `Accept Task`; action is queued locally.
+6. Re-enable network; queued acceptance replays to `ack_incident` automatically.
+7. Verify incident state converges to `acknowledged` on both admin and responder views.
+
+## Demo Runbook: Simulated Coordination
+
+1. Open admin dashboard `/`.
+2. Use `Start Edit Mode` in Responder Simulation panel.
+3. Drag pins to represent staff movement.
+4. Use `Reset Pins` to restore initial seeded locations.
+5. Use `Clear Visuals` to remove selection/error highlights.
 
 Deploy static export to Firebase Hosting:
 

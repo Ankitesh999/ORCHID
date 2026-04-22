@@ -24,6 +24,24 @@ from .settings import AppSettings
 logger = logging.getLogger(__name__)
 
 
+def _extract_json_dict(raw_text: str) -> dict[str, Any]:
+    text = (raw_text or "").strip()
+    if not text:
+        return {}
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 3:
+            text = "\n".join(lines[1:-1]).strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return {}
+    try:
+        return json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return {}
+
+
 class IncidentRepository(Protocol):
     def upsert_fast_incident(self, request_id: str, payload: dict[str, Any], now_iso: str) -> tuple[dict[str, Any], bool]:
         ...
@@ -387,6 +405,9 @@ class FirestoreIncidentRepository:
             "enrichmentState": ENRICHMENT_COMPLETED if not enrichment.get("error") else "failed",
             "updatedAt": now_iso,
         }
+        tactical = enrichment.get("tacticalReasoning")
+        if isinstance(tactical, dict) and tactical:
+            updates["tacticalReasoning"] = tactical
         if enrichment.get("error"):
             updates["enrichmentError"] = enrichment["error"]
         doc_ref.set(updates, merge=True)
@@ -481,6 +502,11 @@ class GeminiEnrichmentClient:
             "Severity must be one of critical/high/medium/low. "
             f"Provisional classification: {provisional}. Provisional severity: {provisional_severity}."
         )
+        if self._settings.enable_tactical_reasoning:
+            prompt += (
+                " Also include an optional tacticalReasoning object with keys safeApproach, hazards, victimCount, "
+                "recommendedEquipment, priorityActions. Keep tactical fields concise and responder-actionable."
+            )
         parts: list[Any] = [prompt]
         image_ref = payload.get("imageRef")
         image_base64 = payload.get("imageBase64")
@@ -493,14 +519,25 @@ class GeminiEnrichmentClient:
         try:
             client = genai.Client(vertexai=True, project=self._settings.project_id, location=self._settings.gemini_location)
             response = client.models.generate_content(model=self._settings.gemini_model, contents=parts)
-            raw_text = (response.text or "").strip()
-            parsed = json.loads(raw_text) if raw_text.startswith("{") else {}
-            return {
+            parsed = _extract_json_dict(response.text or "")
+            result: dict[str, Any] = {
                 "classification": parsed.get("classification", provisional),
                 "severity": parsed.get("severity", provisional_severity),
                 "confidence": float(parsed.get("confidence", 0.5)),
                 "summary": parsed.get("summary", "Gemini enrichment completed."),
             }
+            tactical = parsed.get("tacticalReasoning")
+            if self._settings.enable_tactical_reasoning and isinstance(tactical, dict):
+                result["tacticalReasoning"] = {
+                    "safeApproach": tactical.get("safeApproach"),
+                    "hazards": tactical.get("hazards") if isinstance(tactical.get("hazards"), list) else [],
+                    "victimCount": tactical.get("victimCount") if isinstance(tactical.get("victimCount"), (int, float)) else None,
+                    "recommendedEquipment": tactical.get("recommendedEquipment")
+                    if isinstance(tactical.get("recommendedEquipment"), list)
+                    else [],
+                    "priorityActions": tactical.get("priorityActions") if isinstance(tactical.get("priorityActions"), list) else [],
+                }
+            return result
         except Exception as exc:  # pragma: no cover
             logger.exception("Gemini enrichment failed")
             return {
@@ -775,6 +812,9 @@ class InMemoryIncidentRepository:
             incident["severity"]["enriched"] = enrichment.get("severity")
             incident["confidence"]["enriched"] = enrichment.get("confidence")
             incident["summary"] = enrichment.get("summary")
+            tactical = enrichment.get("tacticalReasoning")
+            if isinstance(tactical, dict) and tactical:
+                incident["tacticalReasoning"] = deepcopy(tactical)
             incident["enrichmentState"] = ENRICHMENT_COMPLETED if not enrichment.get("error") else "failed"
             incident["updatedAt"] = now_iso
             if enrichment.get("error"):

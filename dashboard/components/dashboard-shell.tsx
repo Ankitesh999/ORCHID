@@ -2,12 +2,49 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, User } from "firebase/auth";
-import { collection, limit, onSnapshot, orderBy, query } from "firebase/firestore";
+import { collection, doc, limit, onSnapshot, orderBy, query, updateDoc, where } from "firebase/firestore";
 
 import { auth, db } from "../lib/firebase";
 import { Incident } from "../lib/types";
 
 const ACK_FUNCTION_URL = process.env.NEXT_PUBLIC_ACK_FUNCTION_URL ?? "";
+
+type ResponderPin = {
+  id: string;
+  displayName?: string;
+  availability?: boolean;
+  lastKnownLocation?: {
+    lat?: number;
+    lng?: number;
+  };
+};
+
+const CAMPUS_BOUNDS = {
+  north: 12.9735,
+  south: 12.9695,
+  east: 77.5985,
+  west: 77.591,
+};
+
+function locationToPercent(location?: { lat?: number; lng?: number }) {
+  const lat = Number(location?.lat);
+  const lng = Number(location?.lng);
+  if (Number.isNaN(lat) || Number.isNaN(lng)) {
+    return { x: 50, y: 50 };
+  }
+  const x = ((lng - CAMPUS_BOUNDS.west) / (CAMPUS_BOUNDS.east - CAMPUS_BOUNDS.west)) * 100;
+  const y = ((CAMPUS_BOUNDS.north - lat) / (CAMPUS_BOUNDS.north - CAMPUS_BOUNDS.south)) * 100;
+  return {
+    x: Math.min(98, Math.max(2, x)),
+    y: Math.min(98, Math.max(2, y)),
+  };
+}
+
+function percentToLocation(x: number, y: number) {
+  const lng = CAMPUS_BOUNDS.west + (x / 100) * (CAMPUS_BOUNDS.east - CAMPUS_BOUNDS.west);
+  const lat = CAMPUS_BOUNDS.north - (y / 100) * (CAMPUS_BOUNDS.north - CAMPUS_BOUNDS.south);
+  return { lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6)) };
+}
 
 function formatTime(value?: string | null) {
   if (!value) {
@@ -33,8 +70,13 @@ export function DashboardShell() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [responders, setResponders] = useState<ResponderPin[]>([]);
   const [loading, setLoading] = useState(true);
   const [ackInFlight, setAckInFlight] = useState<string | null>(null);
+  const [pinInFlight, setPinInFlight] = useState<string | null>(null);
+  const [simulationEditMode, setSimulationEditMode] = useState(false);
+  const [selectedResponderId, setSelectedResponderId] = useState<string | null>(null);
+  const [baselinePositions, setBaselinePositions] = useState<Record<string, { lat: number; lng: number }>>({});
 
   useEffect(() => {
     return onAuthStateChanged(auth, (next) => {
@@ -46,14 +88,46 @@ export function DashboardShell() {
   useEffect(() => {
     if (!user) {
       setIncidents([]);
+      setResponders([]);
       return;
     }
     const incidentQuery = query(collection(db, "incidents"), orderBy("createdAt", "desc"), limit(50));
-    return onSnapshot(incidentQuery, (snapshot) => {
+    const incidentUnsubscribe = onSnapshot(incidentQuery, (snapshot) => {
       const rows: Incident[] = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() as Omit<Incident, "id">) }));
       setIncidents(rows);
     });
+
+    const responderQuery = query(collection(db, "users"), where("role", "==", "responder"));
+    const responderUnsubscribe = onSnapshot(responderQuery, (snapshot) => {
+      const rows: ResponderPin[] = snapshot.docs.map((entry) => ({
+        id: entry.id,
+        ...(entry.data() as Omit<ResponderPin, "id">),
+      }));
+      setResponders(rows);
+    });
+
+    return () => {
+      incidentUnsubscribe();
+      responderUnsubscribe();
+    };
   }, [user]);
+
+  useEffect(() => {
+    if (!responders.length) {
+      return;
+    }
+    setBaselinePositions((previous) => {
+      const next = { ...previous };
+      for (const responder of responders) {
+        const lat = Number(responder.lastKnownLocation?.lat);
+        const lng = Number(responder.lastKnownLocation?.lng);
+        if (!Number.isNaN(lat) && !Number.isNaN(lng) && !next[responder.id]) {
+          next[responder.id] = { lat, lng };
+        }
+      }
+      return next;
+    });
+  }, [responders]);
 
   const counts = useMemo(() => {
     const detected = incidents.filter((item) => item.status === "detected").length;
@@ -98,6 +172,70 @@ export function DashboardShell() {
     } finally {
       setAckInFlight(null);
     }
+  }
+
+  async function onDropResponder(event: React.DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    if (!simulationEditMode) {
+      return;
+    }
+    const responderId = event.dataTransfer.getData("text/responder-id");
+    if (!responderId) {
+      return;
+    }
+
+    const board = event.currentTarget.getBoundingClientRect();
+    const x = ((event.clientX - board.left) / board.width) * 100;
+    const y = ((event.clientY - board.top) / board.height) * 100;
+    const nextLocation = percentToLocation(Math.min(100, Math.max(0, x)), Math.min(100, Math.max(0, y)));
+
+    setPinInFlight(responderId);
+    try {
+      await updateDoc(doc(db, "users", responderId), {
+        lastKnownLocation: nextLocation,
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update responder location.");
+    } finally {
+      setPinInFlight(null);
+    }
+  }
+
+  async function onResetSimulation() {
+    const updates = responders
+      .map((responder) => ({
+        responderId: responder.id,
+        location: baselinePositions[responder.id],
+      }))
+      .filter((item) => item.location);
+
+    if (!updates.length) {
+      return;
+    }
+
+    setPinInFlight("resetting");
+    try {
+      await Promise.all(
+        updates.map((item) =>
+          updateDoc(doc(db, "users", item.responderId), {
+            lastKnownLocation: item.location,
+            updatedAt: new Date().toISOString(),
+          })
+        )
+      );
+      setSelectedResponderId(null);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to reset simulation positions.");
+    } finally {
+      setPinInFlight(null);
+    }
+  }
+
+  function onClearVisualStatus() {
+    setSelectedResponderId(null);
+    setError(null);
   }
 
   if (loading) {
@@ -149,6 +287,46 @@ export function DashboardShell() {
 
       {error ? <p className="error inline">{error}</p> : null}
 
+      <section className="card simulation-card">
+        <div className="simulation-head">
+          <div>
+            <h2>Responder Simulation</h2>
+            <p>Drag pins to simulate live staff movement across campus.</p>
+          </div>
+          <div className="simulation-controls">
+            <button type="button" onClick={() => setSimulationEditMode((value) => !value)}>
+              {simulationEditMode ? "Stop Edit Mode" : "Start Edit Mode"}
+            </button>
+            <button type="button" className="button-subtle" onClick={onResetSimulation}>
+              Reset Pins
+            </button>
+            <button type="button" className="button-subtle" onClick={onClearVisualStatus}>
+              Clear Visuals
+            </button>
+          </div>
+        </div>
+        <div className="simulation-board" onDragOver={(event) => event.preventDefault()} onDrop={onDropResponder}>
+          {responders.map((responder) => {
+            const point = locationToPercent(responder.lastKnownLocation);
+            return (
+              <button
+                key={responder.id}
+                className={`sim-pin ${responder.availability === false ? "sim-pin-offline" : ""} ${selectedResponderId === responder.id ? "sim-pin-selected" : ""}`}
+                style={{ left: `${point.x}%`, top: `${point.y}%` }}
+                draggable={simulationEditMode}
+                onClick={() => setSelectedResponderId(responder.id)}
+                onDragStart={(event) => event.dataTransfer.setData("text/responder-id", responder.id)}
+                title={`${responder.displayName || responder.id} (${responder.id})`}
+              >
+                {responder.displayName?.slice(0, 2).toUpperCase() || responder.id.slice(0, 2).toUpperCase()}
+              </button>
+            );
+          })}
+        </div>
+        {pinInFlight ? <p className="simulation-note">Updating {pinInFlight} position...</p> : null}
+        {!simulationEditMode ? <p className="simulation-note">Edit mode is off. Enable it to move pins.</p> : null}
+      </section>
+
       <section className="list">
         {incidents.length === 0 ? (
           <article className="card"><p>No incidents yet.</p></article>
@@ -187,6 +365,13 @@ export function DashboardShell() {
               <p><strong>Created:</strong> {formatTime(incident.createdAt)}</p>
               <p><strong>Updated:</strong> {formatTime(incident.updatedAt)}</p>
               {incident.summary ? <p><strong>Summary:</strong> {incident.summary}</p> : null}
+              {incident.tacticalReasoning ? (
+                <>
+                  <p><strong>Tactical Approach:</strong> {incident.tacticalReasoning.safeApproach || "-"}</p>
+                  <p><strong>Hazards:</strong> {(incident.tacticalReasoning.hazards || []).join(", ") || "-"}</p>
+                  <p><strong>Priority Actions:</strong> {(incident.tacticalReasoning.priorityActions || []).join(", ") || "-"}</p>
+                </>
+              ) : null}
               <div className="incident-actions">
                 <button
                   onClick={() => onAcknowledge(incident.id)}
