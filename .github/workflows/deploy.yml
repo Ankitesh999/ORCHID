@@ -27,6 +27,24 @@ jobs:
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Preflight permissions check
+        run: |
+          set -euo pipefail
+
+          echo "Checking access to Service Usage API..."
+          if ! gcloud services list --enabled --project "${PROJECT_ID}" --format="value(config.name)" >/dev/null 2>&1; then
+            echo "Missing permissions for Terraform project service management."
+            echo "Grant the deploy service account at least:"
+            echo "- roles/serviceusage.serviceUsageAdmin"
+            echo "- roles/viewer"
+            exit 1
+          fi
+
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
 
