@@ -47,12 +47,21 @@ jobs:
             "cloudtasks.queues.create"
           )
 
-          PERMISSIONS_CSV=$(IFS=,; echo "${REQUIRED_PERMISSIONS[*]}")
-          GRANTED=$(gcloud projects test-iam-permissions "${PROJECT_ID}" --permissions="${PERMISSIONS_CSV}" --format="value(permissions)" || true)
+          ACCESS_TOKEN="$(gcloud auth print-access-token)"
+          PERMISSIONS_JOINED="$(IFS='","'; echo "${REQUIRED_PERMISSIONS[*]}")"
+          REQUEST_BODY="{\"permissions\":[\"${PERMISSIONS_JOINED}\"]}"
+
+          RESPONSE="$(curl -sS -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "${REQUEST_BODY}" \
+            "https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT_ID}:testIamPermissions")"
+
+          GRANTED="$(echo "${RESPONSE}" | tr -d '\n')"
 
           MISSING=()
           for permission in "${REQUIRED_PERMISSIONS[@]}"; do
-            if ! grep -q "${permission}" <<< "${GRANTED}"; then
+            if ! grep -q "\"${permission}\"" <<< "${GRANTED}"; then
               MISSING+=("${permission}")
             fi
           done
