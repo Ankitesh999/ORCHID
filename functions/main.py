@@ -78,12 +78,85 @@ def _decode_pubsub_event(cloud_event) -> dict[str, Any]:
 
 
 def _incident_id_from_firestore_event(cloud_event) -> str | None:
-    data = cloud_event.data or {}
-    value = data.get("value") or {}
-    name = value.get("name") or ""
-    if "/documents/incidents/" not in name:
-        return None
-    return str(name).rsplit("/", 1)[-1] or None
+    # Debug: log all CloudEvent attributes to diagnose Gen2 format
+    logger.info(
+        "Firestore event attrs: subject=%s source=%s type=%s id=%s data_type=%s",
+        getattr(cloud_event, "subject", "N/A"),
+        getattr(cloud_event, "source", "N/A"),
+        getattr(cloud_event, "type", "N/A"),
+        getattr(cloud_event, "id", "N/A"),
+        type(cloud_event.data).__name__ if cloud_event.data is not None else "None",
+    )
+
+    # Strategy 1: CloudEvent subject (standard Eventarc Firestore format)
+    # e.g. "documents/incidents/cam-lobby-01-1776997834-6ee5d3c4"
+    subject = getattr(cloud_event, "subject", None) or ""
+    if "incidents/" in subject:
+        incident_id = str(subject).rsplit("/", 1)[-1]
+        if incident_id:
+            logger.info("Resolved incident ID from subject: %s", incident_id)
+            return incident_id
+
+    # Strategy 2: CloudEvent source may contain the document path
+    source = getattr(cloud_event, "source", None) or ""
+    if "incidents/" in source:
+        incident_id = str(source).rsplit("/", 1)[-1]
+        if incident_id:
+            logger.info("Resolved incident ID from source: %s", incident_id)
+            return incident_id
+
+    # Strategy 3: Parse data — might be protobuf bytes wrapped in Pub/Sub
+    data = cloud_event.data
+    if isinstance(data, bytes):
+        try:
+            data = json.loads(data.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # Might be protobuf — try to extract from the raw bytes
+            raw_str = data.decode("utf-8", errors="replace")
+            logger.warning("Could not JSON-decode event data. Raw preview: %s", raw_str[:500])
+            # Try to find incidents/ path in raw bytes
+            match = re.search(r"incidents/([a-zA-Z0-9_-]+)", raw_str)
+            if match:
+                logger.info("Resolved incident ID from raw bytes regex: %s", match.group(1))
+                return match.group(1)
+            return None
+
+    if isinstance(data, dict):
+        # Gen2 via Pub/Sub: data might be {"message": {"data": base64, "attributes": {...}}}
+        message = data.get("message", data)
+        if isinstance(message, dict):
+            # Check Pub/Sub attributes for document path
+            attrs = message.get("attributes") or {}
+            doc_attr = attrs.get("document") or ""
+            if "incidents/" in doc_attr:
+                incident_id = str(doc_attr).rsplit("/", 1)[-1]
+                if incident_id:
+                    logger.info("Resolved incident ID from message attributes: %s", incident_id)
+                    return incident_id
+
+            # Try base64-decoded message data
+            raw_b64 = message.get("data")
+            if raw_b64 and isinstance(raw_b64, str):
+                try:
+                    decoded = base64.b64decode(raw_b64).decode("utf-8", errors="replace")
+                    match = re.search(r"incidents/([a-zA-Z0-9_-]+)", decoded)
+                    if match:
+                        logger.info("Resolved incident ID from b64 message: %s", match.group(1))
+                        return match.group(1)
+                except Exception:
+                    pass
+
+        # Original Gen1 format: data.value.name
+        value = data.get("value") or {}
+        name = value.get("name") or ""
+        if "/documents/incidents/" in name:
+            incident_id = str(name).rsplit("/", 1)[-1]
+            if incident_id:
+                logger.info("Resolved incident ID from value.name: %s", incident_id)
+                return incident_id
+
+    logger.warning("Could not resolve incident ID from cloud event")
+    return None
 
 
 @functions_framework.http
