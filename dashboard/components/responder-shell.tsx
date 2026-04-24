@@ -6,7 +6,6 @@ import {
   doc,
   limit,
   onSnapshot,
-  orderBy,
   query,
   where,
 } from "firebase/firestore";
@@ -94,16 +93,23 @@ export function ResponderShell() {
       });
     });
 
-    const incidentQuery = query(
-      collection(db, "incidents"),
-      where("assignedResponderId", "==", user.uid),
-      orderBy("createdAt", "desc"),
-      limit(20)
+    const incidentQuery = query(collection(db, "incidents"), where("assignedResponderId", "==", user.uid), limit(20));
+    const unsubIncidents = onSnapshot(
+      incidentQuery,
+      (snapshot) => {
+        const rows: Incident[] = snapshot.docs
+          .map((item) => ({ id: item.id, ...(item.data() as Omit<Incident, "id">) }))
+          .sort((a, b) => {
+            const left = Date.parse(String(a.createdAt || 0));
+            const right = Date.parse(String(b.createdAt || 0));
+            return right - left;
+          });
+        setIncidents(rows);
+      },
+      (err) => {
+        setError(`Failed to load assignments: ${err.message}`);
+      }
     );
-    const unsubIncidents = onSnapshot(incidentQuery, (snapshot) => {
-      const rows: Incident[] = snapshot.docs.map((item) => ({ id: item.id, ...(item.data() as Omit<Incident, "id">) }));
-      setIncidents(rows);
-    });
 
     return () => {
       unsubProfile();
