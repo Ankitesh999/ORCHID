@@ -45,6 +45,29 @@ function formatTime(value?: string | null) {
   return date.toLocaleTimeString();
 }
 
+function playAlertSound() {
+  try {
+    const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContext) return;
+    const ctx = new AudioContext();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = "square";
+    osc.frequency.setValueAtTime(440, ctx.currentTime);
+    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.1);
+    osc.frequency.setValueAtTime(440, ctx.currentTime + 0.2);
+    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.3);
+    
+    gain.gain.setValueAtTime(0.05, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+    
+    osc.start();
+    osc.stop(ctx.currentTime + 0.5);
+  } catch (e) {}
+}
+
 function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number) {
   const R = 6371e3;
   const rad = Math.PI / 180;
@@ -268,6 +291,8 @@ export function ResponderShell() {
   const [pendingCount, setPendingCount] = useState(0);
   const [hazards, setHazards] = useState<HazardPin[]>([]);
   const biddedIncidents = useRef<Set<string>>(new Set());
+  const previousActiveRef = useRef<string | null>(null);
+  const [isFlashing, setIsFlashing] = useState(false);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (next) => {
@@ -390,6 +415,18 @@ export function ResponderShell() {
     [incidents]
   );
 
+  useEffect(() => {
+    const currActiveId = activeIncident?.id || null;
+    if (currActiveId && currActiveId !== previousActiveRef.current) {
+      setIsFlashing(true);
+      playAlertSound();
+      const timer = setTimeout(() => setIsFlashing(false), 3000);
+      previousActiveRef.current = currActiveId;
+      return () => clearTimeout(timer);
+    }
+    previousActiveRef.current = currActiveId;
+  }, [activeIncident]);
+
   async function onSignIn(event: React.FormEvent) {
     event.preventDefault();
     setError(null);
@@ -473,7 +510,17 @@ export function ResponderShell() {
       : null;
 
   return (
-    <main className="responder-shell">
+    <main className={`responder-shell ${isFlashing ? "crisis-active" : ""}`}>
+      {isFlashing && (
+        <>
+          <div className="crisis-overlay active" />
+          <div className="crisis-banner">
+            <span className="crisis-icon">⚠</span>
+            NEW ASSIGNMENT RECEIVED
+            <span className="crisis-icon">⚠</span>
+          </div>
+        </>
+      )}
       {/* Offline mesh banner */}
       {!isOnline && (
         <div className="responder-offline-banner">

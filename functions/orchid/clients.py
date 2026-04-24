@@ -528,20 +528,14 @@ class GeminiEnrichmentClient:
             image_bytes = base64.b64decode(image_base64)
             parts.append(genai.types.Part.from_bytes(data=image_bytes, mime_type=image_mime_type))
 
-        from pydantic import BaseModel, Field
-        class TacticalReasoning(BaseModel):
-            safeApproach: str | None = None
-            hazards: list[str] = Field(default_factory=list)
-            victimCount: int | float | None = None
-            recommendedEquipment: list[str] = Field(default_factory=list)
-            priorityActions: list[str] = Field(default_factory=list)
+        from pydantic import BaseModel
 
         class EnrichmentResponse(BaseModel):
             classification: str
             severity: str
             confidence: float
             summary: str
-            tacticalReasoning: TacticalReasoning | None = None
+            tacticalReasoning: dict | None = None
 
         try:
             client = genai.Client(vertexai=True, project=self._settings.project_id, location=self._settings.gemini_location)
