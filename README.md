@@ -80,6 +80,8 @@ Use the mock camera script against your deployed ingest endpoint:
 
 ```powershell
 python scripts/mock_camera.py --ingest-url "https://ingest-incident-e5hgposbrq-uc.a.run.app"
+python scripts/mock_edge_node.py --sensor=vitals --ingest-url "https://ingest-incident-e5hgposbrq-uc.a.run.app"
+
 ```
 
 ## Demo checklist

@@ -13,6 +13,7 @@ env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
   REGION: ${{ vars.GCP_REGION || 'us-central1' }}
   ACK_QUEUE_ID: ${{ vars.ACK_QUEUE_ID || 'incident-ack-deadline' }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   deploy-infra:

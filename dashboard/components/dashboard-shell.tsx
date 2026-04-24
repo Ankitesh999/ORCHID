@@ -197,10 +197,6 @@ export function DashboardShell() {
     if (!simulationEditMode) {
       return;
     }
-    const responderId = event.dataTransfer.getData("text/responder-id");
-    if (!responderId) {
-      return;
-    }
 
     const board = event.currentTarget.getBoundingClientRect();
     const x = ((event.clientX - board.left) / board.width) * 100;
@@ -216,6 +212,11 @@ export function DashboardShell() {
           createdAt: new Date().toISOString()
         }).catch(err => setError(err.message));
       });
+      return;
+    }
+
+    const responderId = event.dataTransfer.getData("text/responder-id");
+    if (!responderId) {
       return;
     }
 
@@ -295,12 +296,27 @@ export function DashboardShell() {
     );
   }
 
+  const hasCrisis = incidents.some(
+    (inc) => inc.status === "unacked_escalation" || inc.status === "detected" || inc.status === "assigned"
+  );
+
   return (
-    <main className="shell">
+    <main className={`shell ${hasCrisis ? "crisis-active" : ""}`}>
+      {hasCrisis && (
+        <>
+          <div className="crisis-overlay active" />
+          <div className="crisis-banner">
+            <span className="crisis-icon">⚠</span>
+            ACTIVE CRISIS — {counts.detected + counts.assigned + counts.escalated} INCIDENT{(counts.detected + counts.assigned + counts.escalated) !== 1 ? "S" : ""} REQUIRE ATTENTION
+            <span className="crisis-icon">⚠</span>
+          </div>
+        </>
+      )}
+
       <header className="topbar">
         <div>
           <h1>ORCHID SOC Dashboard</h1>
-          <p>Realtime incident blackboard with async enrichment and retry loop.</p>
+          <p>Realtime crisis command &amp; control with AI enrichment and decentralised response.</p>
         </div>
         <div className="topbar-actions">
           <span>{user.email}</span>
@@ -309,10 +325,10 @@ export function DashboardShell() {
       </header>
 
       <section className="stats">
-        <article className="card"><h2>Detected</h2><p>{counts.detected}</p></article>
-        <article className="card"><h2>Assigned</h2><p>{counts.assigned}</p></article>
-        <article className="card"><h2>Acknowledged</h2><p>{counts.acked}</p></article>
-        <article className="card"><h2>Escalated</h2><p>{counts.escalated}</p></article>
+        <article className="card stat-detected"><h2>Detected</h2><p>{counts.detected}</p></article>
+        <article className="card stat-assigned"><h2>Assigned</h2><p>{counts.assigned}</p></article>
+        <article className="card stat-acked"><h2>Acknowledged</h2><p>{counts.acked}</p></article>
+        <article className={`card ${counts.escalated > 0 ? "stat-escalated" : ""}`}><h2>Escalated</h2><p>{counts.escalated}</p></article>
       </section>
 
       {error ? <p className="error inline">{error}</p> : null}
@@ -320,22 +336,22 @@ export function DashboardShell() {
       <section className="card simulation-card">
         <div className="simulation-head">
           <div>
-            <h2>Responder Simulation</h2>
+            <h2>🗺️ Responder Simulation</h2>
             <p>Drag pins to simulate live staff movement. Drag hazards to create dynamic zones.</p>
           </div>
           <div className="simulation-controls">
             <div className="hazard-palette" style={{ display: simulationEditMode ? 'flex' : 'none', gap: '8px' }}>
-              <div draggable onDragStart={(e) => e.dataTransfer.setData("text/hazard-type", "fire")} className="sim-pin sim-pin-hazard" title="Drag to add Fire Hazard">🔥</div>
-              <div draggable onDragStart={(e) => e.dataTransfer.setData("text/hazard-type", "spill")} className="sim-pin sim-pin-hazard" title="Drag to add Spill Hazard">💧</div>
+              <div draggable onDragStart={(e) => { e.dataTransfer.setData("text/hazard-type", "fire"); e.dataTransfer.setData("text/responder-id", ""); }} className="sim-pin sim-pin-hazard" title="Drag to add Fire Hazard">🔥</div>
+              <div draggable onDragStart={(e) => { e.dataTransfer.setData("text/hazard-type", "spill"); e.dataTransfer.setData("text/responder-id", ""); }} className="sim-pin sim-pin-hazard" title="Drag to add Spill Hazard">💧</div>
             </div>
             <button type="button" onClick={() => setSimulationEditMode((value) => !value)}>
-              {simulationEditMode ? "Stop Edit Mode" : "Start Edit Mode"}
+              {simulationEditMode ? "🔒 Lock Map" : "✏️ Edit Mode"}
             </button>
             <button type="button" className="button-subtle" onClick={onResetSimulation}>
               Reset Pins
             </button>
             <button type="button" className="button-subtle" onClick={onClearVisualStatus}>
-              Clear Visuals
+              Clear
             </button>
           </div>
         </div>
@@ -363,7 +379,7 @@ export function DashboardShell() {
                 key={hazard.id}
                 className="sim-pin sim-pin-hazard-placed"
                 style={{ left: `${point.x}%`, top: `${point.y}%` }}
-                title={`Hazard: ${hazard.type}`}
+                title={`Hazard: ${hazard.type} — click to remove`}
                 onClick={() => {
                   if (simulationEditMode) {
                     import("firebase/firestore").then(({ deleteDoc, doc }) => {
@@ -378,12 +394,12 @@ export function DashboardShell() {
           })}
         </div>
         {pinInFlight ? <p className="simulation-note">Updating {pinInFlight} position...</p> : null}
-        {!simulationEditMode ? <p className="simulation-note">Edit mode is off. Enable it to move pins.</p> : null}
+        {!simulationEditMode ? <p className="simulation-note">⬆ Enable edit mode to drag pins and drop hazards.</p> : null}
       </section>
 
       <section className="card video-feeds-card">
-        <h2>Live Perception Tier (Edge Fusion)</h2>
-        <p>Real-time mock camera feeds with YOLOv11 bounding boxes and 0.016s detection latency.</p>
+        <h2>📡 Live Perception Tier (Edge Fusion)</h2>
+        <p style={{ color: 'var(--muted)', fontSize: '13px', margin: '2px 0 0' }}>Real-time sensor feeds with YOLOv11 bounding boxes and 0.016s detection latency.</p>
         <div className="feeds-grid">
           {[1, 2, 3, 4].map((i) => {
             const isAlertFeed = i === 1;
@@ -395,7 +411,7 @@ export function DashboardShell() {
                 {showAlert && (
                   <div className="alert-overlay">
                     <div className="bounding-box"></div>
-                    <span className="alert-text">DETECTED: {activeIncident.aiDetection?.label?.toUpperCase() || "MEDICAL DISTRESS"} (0.016s)</span>
+                    <span className="alert-text">detected: {activeIncident.aiDetection?.label?.toUpperCase() || "INCIDENT"}</span>
                   </div>
                 )}
               </div>
@@ -406,59 +422,140 @@ export function DashboardShell() {
 
       <section className="list">
         {incidents.length === 0 ? (
-          <article className="card"><p>No incidents yet.</p></article>
+          <article className="card"><p style={{ color: 'var(--muted)' }}>No incidents yet. Trigger one with the edge node script.</p></article>
         ) : (
-          incidents.map((incident) => (
-            <article key={incident.id} className="card incident">
-              <div className="incident-head">
-                <h3>{incident.id}</h3>
-                <span className={`status status-${incident.status || "unknown"}`}>{incident.status || "unknown"}</span>
-              </div>
-              <p><strong>Camera:</strong> {incident.cameraId || "-"}</p>
-              <p><strong>Provisional:</strong> {incident.classification?.provisional || "-"} ({incident.severity?.provisional || "-"})</p>
-              <p><strong>Vertex Label:</strong> {incident.aiDetection?.label || "-"}</p>
-              <p><strong>Vertex Confidence:</strong> {formatConfidence(incident.aiDetection?.confidence)}</p>
-              <p><strong>Required Skill:</strong> {incident.requiredSkill || "-"}</p>
-              <p><strong>Severity (Rule):</strong> {incident.severity?.provisional || "-"}</p>
-              <p><strong>Enriched:</strong> {incident.classification?.enriched || "-"} ({incident.severity?.enriched || "-"})</p>
-              <p><strong>Enrichment State:</strong> {incident.enrichmentState || "-"}</p>
-              <p><strong>Evidence:</strong> {incident.aiDetection?.evidenceSummary || "-"}</p>
-              <p><strong>Assigned:</strong> {incident.assignedResponderId || "-"}</p>
-              <p><strong>Attempt:</strong> {incident.assignmentAttempt || 0} / 3</p>
-              <p><strong>Assignment Phase:</strong> {incident.assignmentPhase || "-"}</p>
-              <p><strong>Allocation State:</strong> {incident.allocation?.status || "-"}</p>
-              <p><strong>Fallback Used:</strong> {incident.allocation?.fallback ? "yes" : "no"}</p>
-              <p><strong>Score Reason:</strong> {incident.allocation?.scoreReason || "-"}</p>
-              <p><strong>Ack Deadline:</strong> {formatTime(incident.ackDeadline)}</p>
-              <p><strong>Acknowledged At:</strong> {formatTime(incident.acknowledgedAt)}</p>
-              <p><strong>Retry Eligible At:</strong> {formatTime(incident.retryEligibleAt)}</p>
-              <p><strong>Snapshot:</strong> {incident.allocation?.inputSnapshot?.respondersEvaluated ?? 0} responders, skill {incident.allocation?.inputSnapshot?.requiredSkill || "-"}, severity {incident.allocation?.inputSnapshot?.severity || "-"}, confidence {formatConfidence(incident.allocation?.inputSnapshot?.confidence)}</p>
-              <p><strong>Snapshot Evaluated:</strong> {formatTime(incident.allocation?.inputSnapshot?.evaluatedAt)}</p>
-              {(incident.allocation?.topCandidates || []).slice(0, 3).map((candidate) => (
-                <p key={`${incident.id}-${candidate.id}`}>
-                  <strong>Candidate:</strong> {candidate.id} | score {candidate.score.toFixed(6)} | distance {candidate.distanceMeters ?? "-"}m | qualified {candidate.qualified ? "yes" : "no"} | rejected {candidate.rejectedReason || "-"}
-                </p>
-              ))}
-              <p><strong>Created:</strong> {formatTime(incident.createdAt)}</p>
-              <p><strong>Updated:</strong> {formatTime(incident.updatedAt)}</p>
-              {incident.summary ? <p><strong>Summary:</strong> {incident.summary}</p> : null}
-              {incident.tacticalReasoning ? (
-                <>
-                  <p><strong>Tactical Approach:</strong> {incident.tacticalReasoning.safeApproach || "-"}</p>
-                  <p><strong>Hazards:</strong> {(incident.tacticalReasoning.hazards || []).join(", ") || "-"}</p>
-                  <p><strong>Priority Actions:</strong> {(incident.tacticalReasoning.priorityActions || []).join(", ") || "-"}</p>
-                </>
-              ) : null}
-              <div className="incident-actions">
-                <button
-                  onClick={() => onAcknowledge(incident.id)}
-                  disabled={incident.status !== "assigned" || ackInFlight === incident.id}
-                >
-                  {ackInFlight === incident.id ? "Acknowledging..." : "Acknowledge"}
-                </button>
-              </div>
-            </article>
-          ))
+          incidents.map((incident) => {
+            const severity = incident.severity?.provisional || "medium";
+            const isEscalated = incident.status === "unacked_escalation";
+            const summaryText = incident.summary || "";
+            const isErrorSummary = summaryText.toLowerCase().includes("failed") || summaryText.toLowerCase().includes("error");
+            return (
+              <article key={incident.id} className="card incident" style={isEscalated ? { borderColor: 'rgba(239, 68, 68, 0.4)', boxShadow: '0 0 20px rgba(239, 68, 68, 0.1)' } : undefined}>
+                <div className="incident-head">
+                  <h3 title={incident.id}>{incident.id}</h3>
+                  <span className={`status status-${incident.status || "unknown"}`}>{incident.status || "unknown"}</span>
+                </div>
+
+                <div className="incident-grid">
+                  <p className="incident-field">
+                    <strong>Severity</strong>
+                    <span className={`severity-badge severity-${severity}`}>
+                      {severity === "critical" ? "🔴" : severity === "high" ? "🟠" : severity === "medium" ? "🔵" : "⚪"} {severity}
+                    </span>
+                  </p>
+                  <p className="incident-field">
+                    <strong>Camera / Source</strong>
+                    <span className="value">{incident.cameraId || "—"}</span>
+                  </p>
+                  <p className="incident-field">
+                    <strong>Classification</strong>
+                    <span className="value">{incident.classification?.provisional || "—"}</span>
+                  </p>
+                  <p className="incident-field">
+                    <strong>Confidence</strong>
+                    <span className="value">{formatConfidence(incident.aiDetection?.confidence)}</span>
+                  </p>
+                  <p className="incident-field">
+                    <strong>Required Skill</strong>
+                    <span className="value">{incident.requiredSkill || "general"}</span>
+                  </p>
+                  <p className="incident-field">
+                    <strong>Enrichment</strong>
+                    <span className="value">{incident.enrichmentState || "—"}</span>
+                  </p>
+
+                  {summaryText && (
+                    <div className={`incident-summary ${isErrorSummary ? "error-summary" : ""}`}>
+                      {isErrorSummary ? "⚠ " : "📋 "}{summaryText}
+                    </div>
+                  )}
+
+                  {incident.tacticalReasoning && (
+                    <div className="tactical-section">
+                      <h4>🎯 Tactical Intel</h4>
+                      {incident.tacticalReasoning.safeApproach && (
+                        <p><strong style={{ color: 'var(--ink-secondary)' }}>Approach:</strong> {incident.tacticalReasoning.safeApproach}</p>
+                      )}
+                      {(incident.tacticalReasoning.hazards || []).length > 0 && (
+                        <div>
+                          <strong style={{ fontSize: '11px', color: 'var(--ink-secondary)' }}>Hazards:</strong>
+                          <div className="tag-list">{(incident.tacticalReasoning.hazards ?? []).map((h: string, i: number) => <span key={i} className="tag">{h}</span>)}</div>
+                        </div>
+                      )}
+                      {(incident.tacticalReasoning.priorityActions || []).length > 0 && (
+                        <div style={{ marginTop: '6px' }}>
+                          <strong style={{ fontSize: '11px', color: 'var(--ink-secondary)' }}>Priority Actions:</strong>
+                          <div className="tag-list">{(incident.tacticalReasoning.priorityActions ?? []).map((a: string, i: number) => <span key={i} className="tag">{a}</span>)}</div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="incident-section-label">Assignment Details</div>
+                  <p className="incident-field">
+                    <strong>Assigned To</strong>
+                    <span className="value">{incident.assignedResponderId || "—"}</span>
+                  </p>
+                  <p className="incident-field">
+                    <strong>Phase</strong>
+                    <span className="value">{incident.assignmentPhase || "—"}</span>
+                  </p>
+                  <p className="incident-field">
+                    <strong>Attempt</strong>
+                    <span className="value">{incident.assignmentAttempt || 0} / 3</span>
+                  </p>
+                  <p className="incident-field">
+                    <strong>Score Reason</strong>
+                    <span className="value">{incident.allocation?.scoreReason || "—"}</span>
+                  </p>
+                  <p className="incident-field">
+                    <strong>Fallback</strong>
+                    <span className="value">{incident.allocation?.fallback ? "Yes" : "No"}</span>
+                  </p>
+                  <p className="incident-field">
+                    <strong>Evaluated</strong>
+                    <span className="value">{incident.allocation?.inputSnapshot?.respondersEvaluated ?? "—"} bids/responders</span>
+                  </p>
+
+                  {(incident.allocation?.topCandidates || []).slice(0, 3).map((candidate: any) => (
+                    <div key={`${incident.id}-${candidate.id}`} className="candidate-row">
+                      <span>👤 {candidate.id?.slice(0, 12) || "—"}</span>
+                      <span>Score: {candidate.score?.toFixed(6) ?? "—"}</span>
+                      <span>Dist: {candidate.distanceMeters ?? "—"}m</span>
+                      <span>{candidate.qualified ? "✅" : "❌"}</span>
+                    </div>
+                  ))}
+
+                  <div className="incident-section-label">Timeline</div>
+                  <p className="incident-field">
+                    <strong>Created</strong>
+                    <span className="value">{formatTime(incident.createdAt)}</span>
+                  </p>
+                  <p className="incident-field">
+                    <strong>Updated</strong>
+                    <span className="value">{formatTime(incident.updatedAt)}</span>
+                  </p>
+                  <p className="incident-field">
+                    <strong>Ack Deadline</strong>
+                    <span className="value">{formatTime(incident.ackDeadline)}</span>
+                  </p>
+                  <p className="incident-field">
+                    <strong>Acknowledged</strong>
+                    <span className="value">{formatTime(incident.acknowledgedAt)}</span>
+                  </p>
+                </div>
+
+                <div className="incident-actions">
+                  <button
+                    onClick={() => onAcknowledge(incident.id)}
+                    disabled={incident.status !== "assigned" || ackInFlight === incident.id}
+                  >
+                    {ackInFlight === incident.id ? "Acknowledging..." : "✓ Acknowledge"}
+                  </button>
+                </div>
+              </article>
+            );
+          })
         )}
       </section>
     </main>

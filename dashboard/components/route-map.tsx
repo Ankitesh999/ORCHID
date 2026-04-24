@@ -53,24 +53,42 @@ function loadGoogleMaps(apiKey: string): Promise<void> {
   return scriptPromise;
 }
 
+function FallbackMap({ origin, destination, indoorNote }: { origin: Coordinates | null; destination: Coordinates | null; indoorNote?: string }) {
+  return (
+    <div className="fallback-map">
+      <div className="map-icon">🗺️</div>
+      <div className="map-label">Simulated Route Map</div>
+      {origin && destination && (
+        <div className="map-note">
+          Route: ({origin.lat.toFixed(4)}, {origin.lng.toFixed(4)}) → ({destination.lat.toFixed(4)}, {destination.lng.toFixed(4)})
+        </div>
+      )}
+      {indoorNote && <div className="map-note">{indoorNote}</div>}
+      <div className="map-note" style={{ opacity: 0.6, fontSize: '11px' }}>
+        Configure NEXT_PUBLIC_GOOGLE_MAPS_API_KEY for live routing.
+      </div>
+    </div>
+  );
+}
+
 export function RouteMap({ origin, destination, hazards, className, indoorNote }: RouteMapProps) {
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
   const mapRef = useRef<HTMLDivElement | null>(null);
   const markersRef = useRef<any[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [useFallback, setUseFallback] = useState(false);
 
   useEffect(() => {
+    if (!apiKey) {
+      setUseFallback(true);
+      return;
+    }
+
     let mounted = true;
     let currentMap: any = null;
 
     async function renderRoute() {
       if (!mapRef.current || !origin || !destination) {
-        return;
-      }
-      if (!apiKey) {
-        if (mounted) {
-          setError("NEXT_PUBLIC_GOOGLE_MAPS_API_KEY is not configured.");
-        }
         return;
       }
 
@@ -87,14 +105,22 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
           mapTypeControl: false,
           streetViewControl: false,
           fullscreenControl: false,
+          styles: [
+            { elementType: "geometry", stylers: [{ color: "#1d2c4d" }] },
+            { elementType: "labels.text.fill", stylers: [{ color: "#8ec3b9" }] },
+            { elementType: "labels.text.stroke", stylers: [{ color: "#1a3646" }] },
+            { featureType: "road", elementType: "geometry", stylers: [{ color: "#304a7d" }] },
+            { featureType: "water", elementType: "geometry", stylers: [{ color: "#0e1626" }] },
+          ],
         });
         const directionsService = new googleMaps.DirectionsService();
         const directionsRenderer = new googleMaps.DirectionsRenderer({
           map,
           suppressMarkers: false,
           polylineOptions: {
-            strokeColor: "#0c72d8",
+            strokeColor: "#3b82f6",
             strokeWeight: 6,
+            strokeOpacity: 0.9,
           },
         });
 
@@ -119,6 +145,7 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
         currentMap = map;
       } catch (err) {
         if (mounted) {
+          setUseFallback(true);
           setError(err instanceof Error ? err.message : "Failed to render map.");
         }
       }
@@ -135,16 +162,16 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
       if (hazards && hazards.length > 0) {
         hazards.forEach(hazard => {
           try {
-            const color = hazard.type === 'fire' ? '#FF0000' : '#0000FF';
+            const color = hazard.type === 'fire' ? '#FF4444' : '#4488FF';
             const circle = new window.google.maps.Circle({
               strokeColor: color,
-              strokeOpacity: 0.8,
+              strokeOpacity: 0.9,
               strokeWeight: 2,
               fillColor: color,
-              fillOpacity: 0.35,
+              fillOpacity: 0.3,
               map: currentMap,
               center: hazard.location,
-              radius: 25 // 25 meters hazard radius
+              radius: 25
             });
             markersRef.current.push(circle);
           } catch (err) {
@@ -162,6 +189,15 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
       markersRef.current = [];
     };
   }, [apiKey, origin, destination, hazards]);
+
+  if (useFallback) {
+    return (
+      <section className={className}>
+        <FallbackMap origin={origin} destination={destination} indoorNote={indoorNote} />
+        {error ? <p className="error inline">{error}</p> : null}
+      </section>
+    );
+  }
 
   return (
     <section className={className}>
