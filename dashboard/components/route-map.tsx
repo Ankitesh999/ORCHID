@@ -7,9 +7,16 @@ type Coordinates = {
   lng: number;
 };
 
+type HazardPin = {
+  id: string;
+  type: string;
+  location: Coordinates;
+};
+
 type RouteMapProps = {
   origin: Coordinates | null;
   destination: Coordinates | null;
+  hazards?: HazardPin[];
   className?: string;
   indoorNote?: string;
 };
@@ -46,13 +53,15 @@ function loadGoogleMaps(apiKey: string): Promise<void> {
   return scriptPromise;
 }
 
-export function RouteMap({ origin, destination, className, indoorNote }: RouteMapProps) {
+export function RouteMap({ origin, destination, hazards, className, indoorNote }: RouteMapProps) {
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
   const mapRef = useRef<HTMLDivElement | null>(null);
+  const markersRef = useRef<any[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let mounted = true;
+    let currentMap: any = null;
 
     async function renderRoute() {
       if (!mapRef.current || !origin || !destination) {
@@ -106,6 +115,8 @@ export function RouteMap({ origin, destination, className, indoorNote }: RouteMa
             }
           }
         );
+
+        currentMap = map;
       } catch (err) {
         if (mounted) {
           setError(err instanceof Error ? err.message : "Failed to render map.");
@@ -113,12 +124,44 @@ export function RouteMap({ origin, destination, className, indoorNote }: RouteMa
       }
     }
 
-    renderRoute();
+    renderRoute().then(() => {
+      if (!currentMap || !window.google?.maps || !mounted) return;
+      
+      // Clear old markers
+      markersRef.current.forEach(m => m.setMap(null));
+      markersRef.current = [];
+
+      // Add hazards
+      if (hazards && hazards.length > 0) {
+        hazards.forEach(hazard => {
+          try {
+            const color = hazard.type === 'fire' ? '#FF0000' : '#0000FF';
+            const circle = new window.google.maps.Circle({
+              strokeColor: color,
+              strokeOpacity: 0.8,
+              strokeWeight: 2,
+              fillColor: color,
+              fillOpacity: 0.35,
+              map: currentMap,
+              center: hazard.location,
+              radius: 25 // 25 meters hazard radius
+            });
+            markersRef.current.push(circle);
+          } catch (err) {
+            console.error("Failed to render hazard circle for", hazard.id, err);
+          }
+        });
+      }
+    }).catch(err => {
+      console.error("Failed to render route and map", err);
+    });
 
     return () => {
       mounted = false;
+      markersRef.current.forEach(m => m.setMap(null));
+      markersRef.current = [];
     };
-  }, [apiKey, origin, destination]);
+  }, [apiKey, origin, destination, hazards]);
 
   return (
     <section className={className}>

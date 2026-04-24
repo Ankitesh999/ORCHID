@@ -7,6 +7,13 @@ import { collection, doc, limit, onSnapshot, orderBy, query, updateDoc, where } 
 import { auth, db } from "../lib/firebase";
 import { Incident } from "../lib/types";
 
+type HazardPin = {
+  id: string;
+  type: string;
+  location: { lat: number; lng: number };
+  createdAt: string;
+};
+
 const ACK_FUNCTION_URL = process.env.NEXT_PUBLIC_ACK_FUNCTION_URL ?? "";
 
 type ResponderPin = {
@@ -77,6 +84,7 @@ export function DashboardShell() {
   const [simulationEditMode, setSimulationEditMode] = useState(false);
   const [selectedResponderId, setSelectedResponderId] = useState<string | null>(null);
   const [baselinePositions, setBaselinePositions] = useState<Record<string, { lat: number; lng: number }>>({});
+  const [hazards, setHazards] = useState<HazardPin[]>([]);
 
   useEffect(() => {
     return onAuthStateChanged(auth, (next) => {
@@ -106,9 +114,19 @@ export function DashboardShell() {
       setResponders(rows);
     });
 
+    const hazardQuery = query(collection(db, "hazards"), orderBy("createdAt", "desc"));
+    const hazardUnsubscribe = onSnapshot(hazardQuery, (snapshot) => {
+      const rows: HazardPin[] = snapshot.docs.map((doc) => ({
+        id: doc.id,
+        ...(doc.data() as Omit<HazardPin, "id">),
+      }));
+      setHazards(rows);
+    });
+
     return () => {
       incidentUnsubscribe();
       responderUnsubscribe();
+      hazardUnsubscribe();
     };
   }, [user]);
 
@@ -188,6 +206,23 @@ export function DashboardShell() {
     const x = ((event.clientX - board.left) / board.width) * 100;
     const y = ((event.clientY - board.top) / board.height) * 100;
     const nextLocation = percentToLocation(Math.min(100, Math.max(0, x)), Math.min(100, Math.max(0, y)));
+
+    const hazardType = event.dataTransfer.getData("text/hazard-type");
+    if (hazardType) {
+      import("firebase/firestore").then(({ addDoc, collection }) => {
+        addDoc(collection(db, "hazards"), {
+          type: hazardType,
+          location: nextLocation,
+          createdAt: new Date().toISOString()
+        }).catch(err => setError(err.message));
+      });
+      return;
+    }
+
+    const responderId = event.dataTransfer.getData("text/responder-id");
+    if (!responderId) {
+      return;
+    }
 
     setPinInFlight(responderId);
     try {
@@ -291,9 +326,13 @@ export function DashboardShell() {
         <div className="simulation-head">
           <div>
             <h2>Responder Simulation</h2>
-            <p>Drag pins to simulate live staff movement across campus.</p>
+            <p>Drag pins to simulate live staff movement. Drag hazards to create dynamic zones.</p>
           </div>
           <div className="simulation-controls">
+            <div className="hazard-palette" style={{ display: simulationEditMode ? 'flex' : 'none', gap: '8px' }}>
+              <div draggable onDragStart={(e) => e.dataTransfer.setData("text/hazard-type", "fire")} className="sim-pin sim-pin-hazard" title="Drag to add Fire Hazard">🔥</div>
+              <div draggable onDragStart={(e) => e.dataTransfer.setData("text/hazard-type", "spill")} className="sim-pin sim-pin-hazard" title="Drag to add Spill Hazard">💧</div>
+            </div>
             <button type="button" onClick={() => setSimulationEditMode((value) => !value)}>
               {simulationEditMode ? "Stop Edit Mode" : "Start Edit Mode"}
             </button>
@@ -322,9 +361,52 @@ export function DashboardShell() {
               </button>
             );
           })}
+          {hazards.map((hazard) => {
+            const point = locationToPercent(hazard.location);
+            return (
+              <div
+                key={hazard.id}
+                className="sim-pin sim-pin-hazard-placed"
+                style={{ left: `${point.x}%`, top: `${point.y}%` }}
+                title={`Hazard: ${hazard.type}`}
+                onClick={() => {
+                  if (simulationEditMode) {
+                    import("firebase/firestore").then(({ deleteDoc, doc }) => {
+                      deleteDoc(doc(db, "hazards", hazard.id)).catch(console.error);
+                    });
+                  }
+                }}
+              >
+                {hazard.type === "fire" ? "🔥" : "💧"}
+              </div>
+            )
+          })}
         </div>
         {pinInFlight ? <p className="simulation-note">Updating {pinInFlight} position...</p> : null}
         {!simulationEditMode ? <p className="simulation-note">Edit mode is off. Enable it to move pins.</p> : null}
+      </section>
+
+      <section className="card video-feeds-card">
+        <h2>Live Perception Tier (Edge Fusion)</h2>
+        <p>Real-time mock camera feeds with YOLOv11 bounding boxes and 0.016s detection latency.</p>
+        <div className="feeds-grid">
+          {[1, 2, 3, 4].map((i) => {
+            const isAlertFeed = i === 1;
+            const activeIncident = incidents.find(inc => inc.status === "detected" || inc.status === "assigned" || inc.status === "unacked_escalation");
+            const showAlert = isAlertFeed && activeIncident;
+            return (
+              <div key={i} className="video-feed">
+                <div className="video-placeholder">Feed {i}</div>
+                {showAlert && (
+                  <div className="alert-overlay">
+                    <div className="bounding-box"></div>
+                    <span className="alert-text">DETECTED: {activeIncident.aiDetection?.label?.toUpperCase() || "MEDICAL DISTRESS"} (0.016s)</span>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </section>
 
       <section className="list">

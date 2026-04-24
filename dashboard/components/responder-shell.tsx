@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import {
   collection,
   doc,
@@ -27,6 +27,15 @@ type ResponderProfile = {
     lat?: number;
     lng?: number;
   };
+  skills?: string[];
+  availability?: boolean;
+};
+
+type HazardPin = {
+  id: string;
+  type: string;
+  location: { lat: number; lng: number };
+  createdAt: string;
 };
 
 function formatTime(value?: string | null) {
@@ -40,6 +49,18 @@ function formatTime(value?: string | null) {
   return date.toLocaleTimeString();
 }
 
+function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number) {
+  const R = 6371e3;
+  const rad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * rad;
+  const dLng = (lng2 - lng1) * rad;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(lat1 * rad) * Math.cos(lat2 * rad) *
+            Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
 export function ResponderShell() {
   const [user, setUser] = useState<User | null>(null);
   const [email, setEmail] = useState("");
@@ -51,6 +72,8 @@ export function ResponderShell() {
   const [ackInFlight, setAckInFlight] = useState<string | null>(null);
   const [isOnline, setIsOnline] = useState<boolean>(typeof navigator === "undefined" ? true : navigator.onLine);
   const [pendingCount, setPendingCount] = useState(0);
+  const [hazards, setHazards] = useState<HazardPin[]>([]);
+  const biddedIncidents = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (next) => {
@@ -116,6 +139,79 @@ export function ResponderShell() {
       unsubIncidents();
     };
   }, [user]);
+
+  useEffect(() => {
+    if (!user || !profile) return;
+    const openQuery = query(collection(db, "incidents"), where("status", "==", "detected"), limit(10));
+    const unsubOpen = onSnapshot(openQuery, (snapshot) => {
+      snapshot.docs.forEach((docSnap) => {
+        const incident = docSnap.data();
+        if (incident.readyForAllocation && incident.assignmentPhase === "initial") {
+          if (biddedIncidents.current.has(docSnap.id)) {
+            return;
+          }
+          biddedIncidents.current.add(docSnap.id);
+
+          import("firebase/firestore").then(({ setDoc, doc }) => {
+            const bidRef = doc(db, "incidents", docSnap.id, "bids", user.uid);
+            let score = 0;
+            let distance = Infinity;
+            if (profile.lastKnownLocation && incident.location) {
+              const lat1 = Number(profile.lastKnownLocation.lat);
+              const lng1 = Number(profile.lastKnownLocation.lng);
+              const lat2 = Number(incident.location.lat);
+              const lng2 = Number(incident.location.lng);
+              if (!Number.isNaN(lat1) && !Number.isNaN(lng1) && !Number.isNaN(lat2) && !Number.isNaN(lng2)) {
+                distance = Math.max(1, haversineMeters(lat1, lng1, lat2, lng2));
+                const requiredSkill = incident.requiredSkill || "general";
+                const hasSkill = requiredSkill === "general" || (profile.skills && profile.skills.includes(requiredSkill));
+                
+                let severityWeight = 1.0;
+                const severity = incident.severity?.provisional || "medium";
+                if (severity === "critical") severityWeight = 2.0;
+                else if (severity === "high") severityWeight = 1.5;
+                else if (severity === "low") severityWeight = 0.7;
+
+                const skillWeight = hasSkill ? 1.0 : 0.5;
+                const weight = severityWeight * skillWeight;
+                
+                if (profile.availability !== false) {
+                  score = (1.0 / distance) * weight;
+                }
+              }
+            }
+
+            setDoc(bidRef, {
+              responderId: user.uid,
+              timestamp: new Date().toISOString(),
+              score,
+              distance,
+              bidderProfile: profile,
+            }, { merge: true }).catch(console.error);
+          });
+        }
+      });
+    });
+
+    return () => {
+      unsubOpen();
+    };
+  }, [user, profile]);
+
+  useEffect(() => {
+    const hazardQuery = query(collection(db, "hazards"), limit(50));
+    const unsubHazards = onSnapshot(hazardQuery, (snapshot) => {
+      const rows: HazardPin[] = snapshot.docs.map((doc) => ({
+        id: doc.id,
+        ...(doc.data() as Omit<HazardPin, "id">),
+      }));
+      setHazards(rows);
+    });
+
+    return () => {
+      unsubHazards();
+    };
+  }, []);
 
   useEffect(() => {
     const syncPendingCount = () => setPendingCount(listPendingAcks().length);
@@ -282,6 +378,7 @@ export function ResponderShell() {
         className="card"
         origin={origin}
         destination={destination}
+        hazards={hazards}
         indoorNote="Indoor path is mocked for this MVP. Follow nearest building entry after campus route ends."
       />
     </main>

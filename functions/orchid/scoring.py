@@ -43,7 +43,7 @@ def required_skill_from_label(label: str | None) -> str:
     normalized = normalize_detection_label(label)
     if normalized == "fire":
         return "fire_response"
-    if normalized in {"medical_distress", "collapse", "seizure"}:
+    if normalized in {"medical_distress", "collapse", "seizure", "vitals_heart_rate_drop"}:
         return "cpr_certified"
     return "general"
 
@@ -64,6 +64,10 @@ def normalize_detection_label(label: str | None) -> str:
         return "fight"
     if "injury" in normalized:
         return "injury"
+    if "acoustic_distress_vocalization" in normalized:
+        return "acoustic_distress_vocalization"
+    if "vitals_heart_rate_drop" in normalized:
+        return "vitals_heart_rate_drop"
     return normalized
 
 
@@ -71,9 +75,9 @@ def severity_from_label(label: str | None) -> str:
     normalized = normalize_detection_label(label)
     if normalized == "fire":
         return "critical"
-    if normalized in {"medical_distress", "collapse", "seizure"}:
+    if normalized in {"medical_distress", "collapse", "seizure", "vitals_heart_rate_drop"}:
         return "high"
-    if normalized in {"fight", "injury"}:
+    if normalized in {"fight", "injury", "acoustic_distress_vocalization"}:
         return "medium"
     return "low"
 

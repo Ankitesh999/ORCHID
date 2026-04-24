@@ -89,3 +89,8 @@ python scripts/mock_camera.py --ingest-url "https://ingest-incident-e5hgposbrq-u
 3. Confirm assignment appears in responder view.
 4. Simulate offline in responder browser, accept task, then reconnect.
 5. Verify acknowledgment replay and final incident state in admin view.
+
+Email	Role	UID
+admin@orchid.local	admin	tDpDzgEVdzW1akTuEp0geVs5P1c2
+responder.a@orchid.local	responder	sfzu4EBJrIUYbiwgvuKe0PlVVXK2
+responder.b@orchid.local	responder	2oBrmazm0LQcR6Y4CglNdWJ7nv32
