@@ -23,6 +23,29 @@ def _env_int(name: str, default: int) -> int:
     return int(value)
 
 
+def _resolve_project_id() -> str:
+    project_id = (
+        _env("GCP_PROJECT")
+        or _env("GOOGLE_CLOUD_PROJECT")
+        or _env("GCLOUD_PROJECT")
+        or _env("GOOGLE_PROJECT_ID")
+        or ""
+    )
+    if project_id:
+        return project_id
+
+    try:
+        import google.auth
+
+        _, detected_project = google.auth.default()
+        if detected_project:
+            return detected_project
+    except Exception:
+        pass
+
+    return "local-dev"
+
+
 @dataclass(frozen=True)
 class AppSettings:
     project_id: str
@@ -47,9 +70,7 @@ class AppSettings:
 
 
 def load_settings() -> AppSettings:
-    project_id = _env("GCP_PROJECT") or _env("GOOGLE_CLOUD_PROJECT") or ""
-    if not project_id:
-        project_id = "local-dev"
+    project_id = _resolve_project_id()
 
     return AppSettings(
         project_id=project_id,
