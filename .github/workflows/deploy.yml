@@ -60,6 +60,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          IMPORT_VARS=(
+            "-input=false"
+            "-var=project_id=${PROJECT_ID}"
+            "-var=region=${REGION}"
+            "-var=ack_queue_id=${ACK_QUEUE_ID}"
+          )
+
           SERVICES=(
             "artifactregistry.googleapis.com"
             "cloudbuild.googleapis.com"
@@ -75,14 +82,14 @@ jobs:
           )
 
           for svc in "${SERVICES[@]}"; do
-            terraform import "google_project_service.enabled[\"${svc}\"]" "${PROJECT_ID}/${svc}" || true
+            terraform import "${IMPORT_VARS[@]}" "google_project_service.enabled[\"${svc}\"]" "${PROJECT_ID}/${svc}" || true
           done
 
-          terraform import "google_firebase_project.default" "projects/${PROJECT_ID}" || true
-          terraform import "google_firestore_database.default" "projects/${PROJECT_ID}/databases/(default)" || true
-          terraform import "google_pubsub_topic.fast_topic" "projects/${PROJECT_ID}/topics/incident.fast.v1" || true
-          terraform import "google_pubsub_topic.enrich_topic" "projects/${PROJECT_ID}/topics/incident.enrich.request.v1" || true
-          terraform import "google_cloud_tasks_queue.ack_deadline" "projects/${PROJECT_ID}/locations/${REGION}/queues/${ACK_QUEUE_ID}" || true
+          terraform import "${IMPORT_VARS[@]}" "google_firebase_project.default" "projects/${PROJECT_ID}" || true
+          terraform import "${IMPORT_VARS[@]}" "google_firestore_database.default" "projects/${PROJECT_ID}/databases/(default)" || true
+          terraform import "${IMPORT_VARS[@]}" "google_pubsub_topic.fast_topic" "projects/${PROJECT_ID}/topics/incident.fast.v1" || true
+          terraform import "${IMPORT_VARS[@]}" "google_pubsub_topic.enrich_topic" "projects/${PROJECT_ID}/topics/incident.enrich.request.v1" || true
+          terraform import "${IMPORT_VARS[@]}" "google_cloud_tasks_queue.ack_deadline" "projects/${PROJECT_ID}/locations/${REGION}/queues/${ACK_QUEUE_ID}" || true
 
       - name: Terraform Apply
         working-directory: infra
