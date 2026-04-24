@@ -224,14 +224,18 @@ class IncidentOrchestrator:
         fallback = False
         selected_id: str | None = None
         candidate_queue: list[str] = []
-        
+        responders_evaluated = 0
+        scored_qualified: list = []
+
         if ranked_bids:
             selected_id = str(ranked_bids[0].get("responderId"))
             candidate_queue = [str(b.get("responderId")) for b in ranked_bids]
             score_reason = "decentralized_auction_winner"
+            responders_evaluated = len(valid_bids)
         else:
             # Fallback to central logic if no bids received
             responders = self.repo.list_responders()
+            responders_evaluated = len(responders)
             scored_qualified = [
                 score_responder(
                     responder=responder,
@@ -260,7 +264,7 @@ class IncidentOrchestrator:
                     "distanceMeters": round(_safe_float(bid.get("distance"), 0.0), 2),
                     "qualified": True,
                 })
-        else:
+        elif scored_qualified:
             for item in sorted(scored_qualified, key=lambda item: item.score, reverse=True)[:3]:
                 top_candidates.append({
                     "id": item.uid,
@@ -287,7 +291,7 @@ class IncidentOrchestrator:
             score_reason=score_reason,
             top_candidates=top_candidates,
             input_snapshot={
-                "respondersEvaluated": len(responders),
+                "respondersEvaluated": responders_evaluated,
                 "requiredSkill": required_skill,
                 "severity": severity,
                 "confidence": confidence,
