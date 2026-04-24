@@ -64,6 +64,29 @@ function formatTime(value?: string | null) {
   return date.toLocaleString();
 }
 
+function playAlertSound() {
+  try {
+    const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioContext) return;
+    const ctx = new AudioContext();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = "square";
+    osc.frequency.setValueAtTime(440, ctx.currentTime);
+    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.1);
+    osc.frequency.setValueAtTime(440, ctx.currentTime + 0.2);
+    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.3);
+    
+    gain.gain.setValueAtTime(0.05, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+    
+    osc.start();
+    osc.stop(ctx.currentTime + 0.5);
+  } catch (e) {}
+}
+
 function formatConfidence(value?: number) {
   if (value === undefined || value === null) {
     return "-";
@@ -281,6 +304,8 @@ export function DashboardShell() {
   const [selectedResponderId, setSelectedResponderId] = useState<string | null>(null);
   const [baselinePositions, setBaselinePositions] = useState<Record<string, { lat: number; lng: number }>>({});
   const [hazards, setHazards] = useState<HazardPin[]>([]);
+  const previousIncidentsRef = useRef<Incident[]>([]);
+  const [isFlashing, setIsFlashing] = useState(false);
 
   useEffect(() => {
     return onAuthStateChanged(auth, (next) => {
@@ -325,6 +350,21 @@ export function DashboardShell() {
       hazardUnsubscribe();
     };
   }, [user]);
+
+  useEffect(() => {
+    const prevActive = previousIncidentsRef.current.filter(i => i.status === 'detected' || i.status === 'assigned' || i.status === 'unacked_escalation');
+    const currActive = incidents.filter(i => i.status === 'detected' || i.status === 'assigned' || i.status === 'unacked_escalation');
+    
+    const hasNew = currActive.some(inc => !prevActive.find(p => p.id === inc.id));
+    if (hasNew) {
+      setIsFlashing(true);
+      playAlertSound();
+      const timer = setTimeout(() => setIsFlashing(false), 3000);
+      previousIncidentsRef.current = incidents;
+      return () => clearTimeout(timer);
+    }
+    previousIncidentsRef.current = incidents;
+  }, [incidents]);
 
   useEffect(() => {
     if (!responders.length) {
@@ -492,18 +532,14 @@ export function DashboardShell() {
     );
   }
 
-  const hasCrisis = incidents.some(
-    (inc) => inc.status === "unacked_escalation" || inc.status === "detected" || inc.status === "assigned"
-  );
-
   return (
-    <main className={`shell ${hasCrisis ? "crisis-active" : ""}`}>
-      {hasCrisis && (
+    <main className={`shell ${isFlashing ? "crisis-active" : ""}`}>
+      {isFlashing && (
         <>
           <div className="crisis-overlay active" />
           <div className="crisis-banner">
             <span className="crisis-icon">⚠</span>
-            ACTIVE CRISIS — {counts.detected + counts.assigned + counts.escalated} INCIDENT{(counts.detected + counts.assigned + counts.escalated) !== 1 ? "S" : ""} REQUIRE ATTENTION
+            ACTIVE CRISIS — NEW INCIDENT DETECTED
             <span className="crisis-icon">⚠</span>
           </div>
         </>
