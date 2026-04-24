@@ -114,7 +114,7 @@ jobs:
             --trigger-http \
             --allow-unauthenticated \
             --set-env-vars="${COMMON_ENV_VARS}" \
-            --quiet
+            --quiet & PID1=$!
 
           gcloud functions deploy ack_incident \
             --gen2 \
@@ -125,7 +125,7 @@ jobs:
             --trigger-http \
             --allow-unauthenticated \
             --set-env-vars="${COMMON_ENV_VARS}" \
-            --quiet
+            --quiet & PID2=$!
 
           gcloud functions deploy check_ack_deadline \
             --gen2 \
@@ -136,7 +136,11 @@ jobs:
             --trigger-http \
             --allow-unauthenticated \
             --set-env-vars="${COMMON_ENV_VARS}" \
-            --quiet
+            --quiet & PID3=$!
+
+          wait $PID1 || exit 1
+          wait $PID2 || exit 1
+          wait $PID3 || exit 1
 
       - name: Deploy event-driven functions
         run: |
@@ -150,7 +154,7 @@ jobs:
             --entry-point=persist_incident \
             --trigger-topic=incident.fast.v1 \
             --set-env-vars="${COMMON_ENV_VARS}" \
-            --quiet
+            --quiet & PID1=$!
 
           gcloud functions deploy enrich_incident \
             --gen2 \
@@ -160,7 +164,7 @@ jobs:
             --entry-point=enrich_incident \
             --trigger-topic=incident.enrich.request.v1 \
             --set-env-vars="${COMMON_ENV_VARS}" \
-            --quiet
+            --quiet & PID2=$!
 
           gcloud functions deploy allocate_initial_incident \
             --gen2 \
@@ -172,7 +176,11 @@ jobs:
             --trigger-event-filters="database=(default)" \
             --trigger-event-filters-path-pattern="document=incidents/{incidentId}" \
             --set-env-vars="${COMMON_ENV_VARS}" \
-            --quiet
+            --quiet & PID3=$!
+
+          wait $PID1 || exit 1
+          wait $PID2 || exit 1
+          wait $PID3 || exit 1
 
   deploy-hosting:
     name: Deploy Hosting and Rules
@@ -200,6 +208,7 @@ jobs:
           NEXT_PUBLIC_FIREBASE_APP_ID: ${{ secrets.NEXT_PUBLIC_FIREBASE_APP_ID }}
           NEXT_PUBLIC_ACK_FUNCTION_URL: ${{ secrets.NEXT_PUBLIC_ACK_FUNCTION_URL }}
           NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: ${{ secrets.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY }}
+          NEXT_PUBLIC_INGEST_FUNCTION_URL: ${{ secrets.NEXT_PUBLIC_INGEST_FUNCTION_URL }}
         run: |
           npm ci
           npm run build
