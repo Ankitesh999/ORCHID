@@ -55,6 +55,35 @@ jobs:
         working-directory: infra
         run: terraform init -input=false
 
+      - name: Terraform Import Existing Resources
+        working-directory: infra
+        run: |
+          set -euo pipefail
+
+          SERVICES=(
+            "artifactregistry.googleapis.com"
+            "cloudbuild.googleapis.com"
+            "cloudfunctions.googleapis.com"
+            "cloudtasks.googleapis.com"
+            "eventarc.googleapis.com"
+            "firestore.googleapis.com"
+            "firebase.googleapis.com"
+            "firebasehosting.googleapis.com"
+            "iam.googleapis.com"
+            "pubsub.googleapis.com"
+            "run.googleapis.com"
+          )
+
+          for svc in "${SERVICES[@]}"; do
+            terraform import "google_project_service.enabled[\"${svc}\"]" "${PROJECT_ID}/${svc}" || true
+          done
+
+          terraform import "google_firebase_project.default" "projects/${PROJECT_ID}" || true
+          terraform import "google_firestore_database.default" "projects/${PROJECT_ID}/databases/(default)" || true
+          terraform import "google_pubsub_topic.fast_topic" "projects/${PROJECT_ID}/topics/incident.fast.v1" || true
+          terraform import "google_pubsub_topic.enrich_topic" "projects/${PROJECT_ID}/topics/incident.enrich.request.v1" || true
+          terraform import "google_cloud_tasks_queue.ack_deadline" "projects/${PROJECT_ID}/locations/${REGION}/queues/${ACK_QUEUE_ID}" || true
+
       - name: Terraform Apply
         working-directory: infra
         run: |
