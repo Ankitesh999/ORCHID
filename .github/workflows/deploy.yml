@@ -36,6 +36,10 @@ jobs:
         run: |
           set -euo pipefail
 
+          ACTIVE_ACCOUNT="$(gcloud config get-value account 2>/dev/null || true)"
+          echo "Preflight principal: ${ACTIVE_ACCOUNT}"
+          echo "Preflight project: ${PROJECT_ID}"
+
           REQUIRED_PERMISSIONS=(
             "resourcemanager.projects.get"
             "serviceusage.services.list"
