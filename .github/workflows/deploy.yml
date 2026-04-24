@@ -1,0 +1,169 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+  ACK_QUEUE_ID: ${{ vars.ACK_QUEUE_ID || 'incident-ack-deadline' }}
+
+jobs:
+  deploy-infra:
+    name: Deploy Infrastructure (Terraform)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        working-directory: infra
+        run: terraform init -input=false
+
+      - name: Terraform Apply
+        working-directory: infra
+        run: |
+          terraform apply -auto-approve -input=false \
+            -var="project_id=${PROJECT_ID}" \
+            -var="region=${REGION}" \
+            -var="ack_queue_id=${ACK_QUEUE_ID}"
+
+  deploy-functions:
+    name: Deploy Cloud Functions
+    needs: deploy-infra
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Deploy HTTP functions
+        run: |
+          COMMON_ENV_VARS="FAST_TOPIC_ID=incident.fast.v1,ENRICH_TOPIC_ID=incident.enrich.request.v1,ACK_TIMEOUT_SECONDS=15,MAX_ASSIGNMENT_ATTEMPTS=3,NO_CANDIDATE_RETRY_SECONDS=30,ACK_QUEUE_ID=${ACK_QUEUE_ID},ACK_CALLBACK_URL=https://${REGION}-${PROJECT_ID}.cloudfunctions.net/check_ack_deadline,ENABLE_VERTEX_DETECTION=true,VERTEX_DETECTION_MODEL=gemini-2.5-flash,VERTEX_DETECTION_CONFIDENCE_THRESHOLD=0.6,ENABLE_GEMINI=true,GEMINI_MODEL=gemini-2.5-flash,ENABLE_TACTICAL_REASONING=false,FUNCTION_REGION=${REGION}"
+
+          gcloud functions deploy ingest_incident \
+            --gen2 \
+            --runtime=python311 \
+            --region="${REGION}" \
+            --source=functions \
+            --entry-point=ingest_incident \
+            --trigger-http \
+            --allow-unauthenticated \
+            --set-env-vars="${COMMON_ENV_VARS}" \
+            --quiet
+
+          gcloud functions deploy ack_incident \
+            --gen2 \
+            --runtime=python311 \
+            --region="${REGION}" \
+            --source=functions \
+            --entry-point=ack_incident \
+            --trigger-http \
+            --allow-unauthenticated \
+            --set-env-vars="${COMMON_ENV_VARS}" \
+            --quiet
+
+          gcloud functions deploy check_ack_deadline \
+            --gen2 \
+            --runtime=python311 \
+            --region="${REGION}" \
+            --source=functions \
+            --entry-point=check_ack_deadline \
+            --trigger-http \
+            --allow-unauthenticated \
+            --set-env-vars="${COMMON_ENV_VARS}" \
+            --quiet
+
+      - name: Deploy event-driven functions
+        run: |
+          COMMON_ENV_VARS="FAST_TOPIC_ID=incident.fast.v1,ENRICH_TOPIC_ID=incident.enrich.request.v1,ACK_TIMEOUT_SECONDS=15,MAX_ASSIGNMENT_ATTEMPTS=3,NO_CANDIDATE_RETRY_SECONDS=30,ACK_QUEUE_ID=${ACK_QUEUE_ID},ACK_CALLBACK_URL=https://${REGION}-${PROJECT_ID}.cloudfunctions.net/check_ack_deadline,ENABLE_VERTEX_DETECTION=true,VERTEX_DETECTION_MODEL=gemini-2.5-flash,VERTEX_DETECTION_CONFIDENCE_THRESHOLD=0.6,ENABLE_GEMINI=true,GEMINI_MODEL=gemini-2.5-flash,ENABLE_TACTICAL_REASONING=false,FUNCTION_REGION=${REGION}"
+
+          gcloud functions deploy persist_incident \
+            --gen2 \
+            --runtime=python311 \
+            --region="${REGION}" \
+            --source=functions \
+            --entry-point=persist_incident \
+            --trigger-topic=incident.fast.v1 \
+            --set-env-vars="${COMMON_ENV_VARS}" \
+            --quiet
+
+          gcloud functions deploy enrich_incident \
+            --gen2 \
+            --runtime=python311 \
+            --region="${REGION}" \
+            --source=functions \
+            --entry-point=enrich_incident \
+            --trigger-topic=incident.enrich.request.v1 \
+            --set-env-vars="${COMMON_ENV_VARS}" \
+            --quiet
+
+          gcloud functions deploy allocate_initial_incident \
+            --gen2 \
+            --runtime=python311 \
+            --region="${REGION}" \
+            --source=functions \
+            --entry-point=allocate_initial_incident \
+            --trigger-event-filters="type=google.cloud.firestore.document.v1.created" \
+            --trigger-event-filters="database=(default)" \
+            --trigger-event-filters-path-pattern="document=incidents/{incidentId}" \
+            --set-env-vars="${COMMON_ENV_VARS}" \
+            --quiet
+
+  deploy-hosting:
+    name: Deploy Hosting and Rules
+    needs: deploy-functions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Build dashboard export
+        working-directory: dashboard
+        env:
+          NEXT_PUBLIC_FIREBASE_API_KEY: ${{ secrets.NEXT_PUBLIC_FIREBASE_API_KEY }}
+          NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ${{ secrets.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN }}
+          NEXT_PUBLIC_FIREBASE_PROJECT_ID: ${{ secrets.NEXT_PUBLIC_FIREBASE_PROJECT_ID }}
+          NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: ${{ secrets.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET }}
+          NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID }}
+          NEXT_PUBLIC_FIREBASE_APP_ID: ${{ secrets.NEXT_PUBLIC_FIREBASE_APP_ID }}
+          NEXT_PUBLIC_ACK_FUNCTION_URL: ${{ secrets.NEXT_PUBLIC_ACK_FUNCTION_URL }}
+          NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: ${{ secrets.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY }}
+        run: |
+          npm ci
+          npm run build
+
+      - name: Deploy Firebase hosting and rules
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+        run: npx firebase-tools deploy --project "${PROJECT_ID}" --token "${FIREBASE_TOKEN}" --only hosting,firestore:rules
