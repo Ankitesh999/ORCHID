@@ -28,6 +28,16 @@ service cloud.firestore {
     match /incidents/{incidentId} {
       allow read: if signedIn() && (role() == "admin" || role() == "responder");
       allow create, update, delete: if signedIn() && role() == "admin";
+
+      match /bids/{bidId} {
+        allow read: if signedIn() && (role() == "admin" || role() == "responder");
+        allow create, update: if signedIn() && role() == "responder" && request.auth.uid == bidId;
+      }
+    }
+
+    match /hazards/{hazardId} {
+      allow read: if signedIn();
+      allow create, delete: if signedIn() && role() == "admin";
     }
   }
 }

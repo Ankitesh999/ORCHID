@@ -84,6 +84,12 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
       return;
     }
 
+    // Google Maps fires this global callback when the API key is invalid
+    (window as any).gm_authFailure = () => {
+      setUseFallback(true);
+      setError("Google Maps API key is invalid or restricted.");
+    };
+
     let mounted = true;
     let currentMap: any = null;
 
