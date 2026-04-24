@@ -79,7 +79,7 @@ python scripts/seed_users_and_claims.py --project-id YOUR_PROJECT_ID --users-jso
 Use the mock camera script against your deployed ingest endpoint:
 
 ```powershell
-python scripts/mock_camera.py --ingest-url "https://REGION-PROJECT.cloudfunctions.net/ingest_incident"
+python scripts/mock_camera.py --ingest-url "https://ingest-incident-e5hgposbrq-uc.a.run.app"
 ```
 
 ## Demo checklist
