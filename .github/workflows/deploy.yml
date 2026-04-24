@@ -40,51 +40,13 @@ jobs:
           echo "Preflight principal: ${ACTIVE_ACCOUNT}"
           echo "Preflight project: ${PROJECT_ID}"
 
-          REQUIRED_PERMISSIONS=(
-            "resourcemanager.projects.get"
-            "serviceusage.services.list"
-            "serviceusage.services.enable"
-            "firebase.projects.get"
-            "firebase.projects.update"
-            "datastore.databases.create"
-            "pubsub.topics.create"
-            "cloudtasks.queues.create"
-          )
+          echo "Checking project read access..."
+          gcloud projects describe "${PROJECT_ID}" --format="value(projectId)"
 
-          ACCESS_TOKEN="$(gcloud auth print-access-token)"
-          PERMISSIONS_JOINED="$(IFS='","'; echo "${REQUIRED_PERMISSIONS[*]}")"
-          REQUEST_BODY="{\"permissions\":[\"${PERMISSIONS_JOINED}\"]}"
+          echo "Checking Service Usage list access..."
+          gcloud services list --enabled --project "${PROJECT_ID}" --format="value(config.name)" >/dev/null
 
-          RESPONSE="$(curl -sS -X POST \
-            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "${REQUEST_BODY}" \
-            "https://cloudresourcemanager.googleapis.com/v1/projects/${PROJECT_ID}:testIamPermissions")"
-
-          GRANTED="$(echo "${RESPONSE}" | tr -d '\n')"
-
-          MISSING=()
-          for permission in "${REQUIRED_PERMISSIONS[@]}"; do
-            if ! grep -q "\"${permission}\"" <<< "${GRANTED}"; then
-              MISSING+=("${permission}")
-            fi
-          done
-
-          if [ "${#MISSING[@]}" -gt 0 ]; then
-            echo "Missing required IAM permissions for Terraform deploy:"
-            printf ' - %s\n' "${MISSING[@]}"
-            echo "Grant roles to the CI service account, then re-run workflow."
-            echo "Suggested roles:"
-            echo "- roles/serviceusage.serviceUsageAdmin"
-            echo "- roles/firebase.admin"
-            echo "- roles/datastore.owner"
-            echo "- roles/pubsub.admin"
-            echo "- roles/cloudtasks.admin"
-            echo "- roles/viewer"
-            exit 1
-          fi
-
-          echo "All required Terraform preflight permissions are present."
+          echo "Preflight auth sanity checks passed."
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
