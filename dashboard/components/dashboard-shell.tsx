@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, User } from "firebase/auth";
 import { collection, doc, limit, onSnapshot, orderBy, query, updateDoc, where } from "firebase/firestore";
 
@@ -70,6 +70,202 @@ function formatConfidence(value?: number) {
   }
   return value.toFixed(2);
 }
+
+// ─── PERCEPTION TIER ────────────────────────────────────────────────────────
+
+type PerceptionFeedConfig = {
+  id: string;
+  cameraId: string;
+  label: string;
+  sensorType: "camera" | "acoustic" | "vitals" | "clear";
+  sensorIcon: string;
+  zone: string;
+};
+
+const FEEDS: PerceptionFeedConfig[] = [
+  { id: "f1", cameraId: "cam-lobby-01",    label: "CAM-LOBBY-01",    sensorType: "camera",  sensorIcon: "📷", zone: "Lobby" },
+  { id: "f2", cameraId: "mic-hallway-02",  label: "MIC-HALLWAY-02", sensorType: "acoustic", sensorIcon: "🎙️", zone: "Hallway" },
+  { id: "f3", cameraId: "wearable-user-09",label: "WEARABLE-09",    sensorType: "vitals",  sensorIcon: "❤️", zone: "Floor 2" },
+  { id: "f4", cameraId: "cam-entrance-03", label: "CAM-ENTRANCE-03",sensorType: "clear",   sensorIcon: "📷", zone: "Entrance" },
+];
+
+function useConfidenceMeter(isAlert: boolean) {
+  const [confidence, setConfidence] = useState(Math.random() * 20 + 8);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (intervalRef.current) clearInterval(intervalRef.current);
+    if (isAlert) {
+      // Spike to high confidence
+      setConfidence(Math.random() * 12 + 85);
+      intervalRef.current = setInterval(() => {
+        setConfidence(Math.random() * 12 + 85);
+      }, 800);
+    } else {
+      setConfidence(Math.random() * 18 + 8);
+      intervalRef.current = setInterval(() => {
+        setConfidence((prev) => {
+          const next = prev + (Math.random() - 0.5) * 6;
+          return Math.min(35, Math.max(5, next));
+        });
+      }, 1200);
+    }
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+  }, [isAlert]);
+
+  return confidence;
+}
+
+function CameraFeedAlert({ incident }: { incident: { aiDetection?: { label?: string; confidence?: number }; id: string } }) {
+  return (
+    <div className="alert-overlay">
+      <div className="bounding-box" />
+      <span className="alert-text">detected: {incident.aiDetection?.label?.toUpperCase() || "INCIDENT"}</span>
+      <div className="feed-confidence-bar-active" style={{ width: `${((incident.aiDetection?.confidence ?? 0.9) * 100).toFixed(0)}%` }} />
+    </div>
+  );
+}
+
+function AcousticWaveform({ active }: { active: boolean }) {
+  const bars = Array.from({ length: 20 }, (_, i) => i);
+  return (
+    <div className="acoustic-waveform">
+      {bars.map((i) => (
+        <div
+          key={i}
+          className={`waveform-bar ${active ? "waveform-bar-active" : ""}`}
+          style={{
+            animationDelay: `${i * 0.06}s`,
+            animationDuration: active ? `${0.3 + Math.random() * 0.4}s` : `${1 + Math.random() * 1.5}s`,
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function VitalsFeed({ active }: { active: boolean }) {
+  return (
+    <div className="vitals-feed">
+      <svg viewBox="0 0 200 60" className={`vitals-svg ${active ? "vitals-svg-alert" : ""}`}>
+        {active ? (
+          <polyline
+            className="vitals-line vitals-line-spike"
+            points="0,30 20,30 30,30 40,5 50,55 60,30 80,30 100,30 110,30 120,8 130,52 140,30 160,30 180,30 200,30"
+          />
+        ) : (
+          <>
+            <polyline className="vitals-line" points="0,30 40,30 50,22 60,38 70,30 120,30 130,24 140,36 150,30 200,30" />
+            <circle className="vitals-dot" cx="50" cy="22" r="2" />
+          </>
+        )}
+      </svg>
+      <span className={`vitals-label ${active ? "vitals-label-alert" : ""}`}>
+        {active ? "⚠ ANOMALY" : "NOMINAL"}
+      </span>
+    </div>
+  );
+}
+
+function PerceptionFeedCard({ feed, activeIncident }: {
+  feed: PerceptionFeedConfig;
+  activeIncident: Incident | undefined;
+}) {
+  const isAlert = !!activeIncident && feed.sensorType !== "clear";
+  const confidence = useConfidenceMeter(isAlert);
+
+  return (
+    <div className={`video-feed pf-card ${isAlert ? "pf-card-alert" : ""}`}>
+      {/* Header bar */}
+      <div className="pf-header">
+        <div className="pf-header-left">
+          <span className="pf-live-dot" />
+          <span className="pf-label">{feed.label}</span>
+        </div>
+        <div className="pf-header-right">
+          <span className="pf-sensor-icon">{feed.sensorIcon}</span>
+          <span className="pf-zone">{feed.zone}</span>
+        </div>
+      </div>
+
+      {/* Feed body */}
+      {feed.sensorType === "camera" && (
+        <div className="video-placeholder pf-camera-bg">
+          <div className="pf-scanlines" />
+          {isAlert ? (
+            <CameraFeedAlert incident={activeIncident!} />
+          ) : (
+            <span className="pf-idle-text">NO ANOMALY</span>
+          )}
+        </div>
+      )}
+      {feed.sensorType === "acoustic" && (
+        <div className="video-placeholder pf-acoustic-bg">
+          {isAlert && <div className="pf-alert-border" />}
+          <AcousticWaveform active={isAlert} />
+          {isAlert && <span className="alert-text" style={{ top: 'auto', bottom: 8 }}>ACOUSTIC DISTRESS</span>}
+        </div>
+      )}
+      {feed.sensorType === "vitals" && (
+        <div className="video-placeholder pf-vitals-bg">
+          {isAlert && <div className="pf-alert-border" />}
+          <VitalsFeed active={isAlert} />
+          {isAlert && <span className="alert-text" style={{ top: 'auto', bottom: 8 }}>HR ANOMALY</span>}
+        </div>
+      )}
+      {feed.sensorType === "clear" && (
+        <div className="video-placeholder pf-clear-bg">
+          <span className="pf-clear-label">✓ ALL CLEAR</span>
+        </div>
+      )}
+
+      {/* Confidence meter footer */}
+      <div className="pf-footer">
+        <span className="pf-conf-label">CONF</span>
+        <div className="pf-conf-track">
+          <div
+            className={`pf-conf-fill ${isAlert ? "pf-conf-fill-alert" : ""}`}
+            style={{ width: `${confidence.toFixed(1)}%` }}
+          />
+        </div>
+        <span className={`pf-conf-pct ${isAlert ? "pf-conf-pct-alert" : ""}`}>
+          {confidence.toFixed(0)}%
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function PerceptionTier({ incidents }: { incidents: Incident[] }) {
+  const activeIncident = incidents.find(
+    (inc) => inc.status === "detected" || inc.status === "assigned" || inc.status === "unacked_escalation"
+  );
+
+  return (
+    <section className="card video-feeds-card">
+      <div className="pf-section-head">
+        <div>
+          <h2>📡 Live Perception Tier <span className="pf-subtitle">Edge Fusion</span></h2>
+          <p style={{ color: 'var(--muted)', fontSize: '13px', margin: '2px 0 0' }}>
+            YOLOv11 · Acoustic classifier · BLE vitals gateway — 0.016s detection latency
+          </p>
+        </div>
+        <div className="pf-status-pills">
+          <span className="pf-pill pf-pill-green">📷 2 CAMERAS</span>
+          <span className="pf-pill pf-pill-purple">🎙️ ACOUSTIC</span>
+          <span className="pf-pill pf-pill-red">❤️ VITALS</span>
+        </div>
+      </div>
+      <div className="feeds-grid">
+        {FEEDS.map((feed) => (
+          <PerceptionFeedCard key={feed.id} feed={feed} activeIncident={activeIncident} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+// ─── END PERCEPTION TIER ────────────────────────────────────────────────────
 
 export function DashboardShell() {
   const [user, setUser] = useState<User | null>(null);
@@ -319,6 +515,7 @@ export function DashboardShell() {
           <p>Realtime crisis command &amp; control with AI enrichment and decentralised response.</p>
         </div>
         <div className="topbar-actions">
+          <a href="/inject" className="inject-pill-link">⚡ Crisis Injector</a>
           <span>{user.email}</span>
           <button onClick={() => signOut(auth)}>Sign Out</button>
         </div>
@@ -356,28 +553,63 @@ export function DashboardShell() {
           </div>
         </div>
         <div className="simulation-board" onDragOver={(event) => event.preventDefault()} onDrop={onDropResponder}>
+          {/* Zone labels */}
+          <span className="sim-zone-label" style={{ left: '12%', top: '15%' }}>LOBBY</span>
+          <span className="sim-zone-label" style={{ left: '52%', top: '15%' }}>EAST WING</span>
+          <span className="sim-zone-label" style={{ left: '12%', top: '62%' }}>CORRIDOR A</span>
+          <span className="sim-zone-label" style={{ left: '62%', top: '62%' }}>EXIT BLOCK</span>
+
+          {/* Incident crosshair pins */}
+          {incidents
+            .filter(inc => inc.location?.lat && inc.location?.lng && (inc.status === 'detected' || inc.status === 'assigned' || inc.status === 'unacked_escalation'))
+            .map(inc => {
+              const pt = locationToPercent(inc.location as { lat: number; lng: number });
+              return (
+                <div
+                  key={`crosshair-${inc.id}`}
+                  className="sim-incident-crosshair"
+                  style={{ left: `${pt.x}%`, top: `${pt.y}%` }}
+                  title={`Active Incident: ${inc.id}`}
+                >
+                  <div className="sim-crosshair-ring" />
+                  <div className="sim-crosshair-dot" />
+                </div>
+              );
+            })}
+
+          {/* Responder pins */}
           {responders.map((responder) => {
             const point = locationToPercent(responder.lastKnownLocation);
+            const isAssignedToActive = incidents.some(
+              inc => inc.assignedResponderId === responder.id &&
+                (inc.status === 'assigned' || inc.status === 'unacked_escalation')
+            );
             return (
               <button
                 key={responder.id}
-                className={`sim-pin ${responder.availability === false ? "sim-pin-offline" : ""} ${selectedResponderId === responder.id ? "sim-pin-selected" : ""}`}
+                className={`sim-pin ${
+                  responder.availability === false ? "sim-pin-offline" :
+                  isAssignedToActive ? "sim-pin-responding" : "sim-pin-available"
+                } ${selectedResponderId === responder.id ? "sim-pin-selected" : ""}`}
                 style={{ left: `${point.x}%`, top: `${point.y}%` }}
                 draggable={simulationEditMode}
                 onClick={() => setSelectedResponderId(responder.id)}
                 onDragStart={(event) => event.dataTransfer.setData("text/responder-id", responder.id)}
-                title={`${responder.displayName || responder.id} (${responder.id})`}
+                title={`${responder.displayName || responder.id}${isAssignedToActive ? ' — EN ROUTE' : ''}`}
               >
                 {responder.displayName?.slice(0, 2).toUpperCase() || responder.id.slice(0, 2).toUpperCase()}
+                {isAssignedToActive && <span className="sim-pin-pulse" />}
               </button>
             );
           })}
+
+          {/* Hazard zones */}
           {hazards.map((hazard) => {
             const point = locationToPercent(hazard.location);
             return (
               <div
                 key={hazard.id}
-                className="sim-pin sim-pin-hazard-placed"
+                className={`sim-pin sim-pin-hazard-placed ${hazard.type === 'fire' ? 'sim-hazard-fire' : 'sim-hazard-spill'}`}
                 style={{ left: `${point.x}%`, top: `${point.y}%` }}
                 title={`Hazard: ${hazard.type} — click to remove`}
                 onClick={() => {
@@ -389,6 +621,7 @@ export function DashboardShell() {
                 }}
               >
                 {hazard.type === "fire" ? "🔥" : "💧"}
+                <div className="sim-hazard-zone" />
               </div>
             )
           })}
@@ -397,28 +630,7 @@ export function DashboardShell() {
         {!simulationEditMode ? <p className="simulation-note">⬆ Enable edit mode to drag pins and drop hazards.</p> : null}
       </section>
 
-      <section className="card video-feeds-card">
-        <h2>📡 Live Perception Tier (Edge Fusion)</h2>
-        <p style={{ color: 'var(--muted)', fontSize: '13px', margin: '2px 0 0' }}>Real-time sensor feeds with YOLOv11 bounding boxes and 0.016s detection latency.</p>
-        <div className="feeds-grid">
-          {[1, 2, 3, 4].map((i) => {
-            const isAlertFeed = i === 1;
-            const activeIncident = incidents.find(inc => inc.status === "detected" || inc.status === "assigned" || inc.status === "unacked_escalation");
-            const showAlert = isAlertFeed && activeIncident;
-            return (
-              <div key={i} className="video-feed">
-                <div className="video-placeholder">Feed {i}</div>
-                {showAlert && (
-                  <div className="alert-overlay">
-                    <div className="bounding-box"></div>
-                    <span className="alert-text">detected: {activeIncident.aiDetection?.label?.toUpperCase() || "INCIDENT"}</span>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </section>
+      <PerceptionTier incidents={incidents} />
 
       <section className="list">
         {incidents.length === 0 ? (
