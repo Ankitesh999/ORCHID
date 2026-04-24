@@ -18,6 +18,7 @@ jobs:
   deploy-infra:
     name: Deploy Infrastructure (Terraform)
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -67,29 +68,11 @@ jobs:
             "-var=ack_queue_id=${ACK_QUEUE_ID}"
           )
 
-          SERVICES=(
-            "artifactregistry.googleapis.com"
-            "cloudbuild.googleapis.com"
-            "cloudfunctions.googleapis.com"
-            "cloudtasks.googleapis.com"
-            "eventarc.googleapis.com"
-            "firestore.googleapis.com"
-            "firebase.googleapis.com"
-            "firebasehosting.googleapis.com"
-            "iam.googleapis.com"
-            "pubsub.googleapis.com"
-            "run.googleapis.com"
-          )
-
-          for svc in "${SERVICES[@]}"; do
-            terraform import "${IMPORT_VARS[@]}" "google_project_service.enabled[\"${svc}\"]" "${PROJECT_ID}/${svc}" || true
-          done
-
-          terraform import "${IMPORT_VARS[@]}" "google_firebase_project.default" "projects/${PROJECT_ID}" || true
-          terraform import "${IMPORT_VARS[@]}" "google_firestore_database.default" "projects/${PROJECT_ID}/databases/(default)" || true
-          terraform import "${IMPORT_VARS[@]}" "google_pubsub_topic.fast_topic" "projects/${PROJECT_ID}/topics/incident.fast.v1" || true
-          terraform import "${IMPORT_VARS[@]}" "google_pubsub_topic.enrich_topic" "projects/${PROJECT_ID}/topics/incident.enrich.request.v1" || true
-          terraform import "${IMPORT_VARS[@]}" "google_cloud_tasks_queue.ack_deadline" "projects/${PROJECT_ID}/locations/${REGION}/queues/${ACK_QUEUE_ID}" || true
+          # Import only resources that can fail with 409 if they already exist.
+          timeout 180 terraform import "${IMPORT_VARS[@]}" "google_firestore_database.default" "projects/${PROJECT_ID}/databases/(default)" || true
+          timeout 180 terraform import "${IMPORT_VARS[@]}" "google_pubsub_topic.fast_topic" "projects/${PROJECT_ID}/topics/incident.fast.v1" || true
+          timeout 180 terraform import "${IMPORT_VARS[@]}" "google_pubsub_topic.enrich_topic" "projects/${PROJECT_ID}/topics/incident.enrich.request.v1" || true
+          timeout 180 terraform import "${IMPORT_VARS[@]}" "google_cloud_tasks_queue.ack_deadline" "projects/${PROJECT_ID}/locations/${REGION}/queues/${ACK_QUEUE_ID}" || true
 
       - name: Terraform Apply
         working-directory: infra
