@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -193,32 +195,44 @@ class IncidentOrchestrator:
         if str(incident.get("assignmentPhase") or "") != ASSIGNMENT_PHASE_INITIAL:
             return incident
 
+        """
+        Allocate the initial responder to an incident.
+        Uses a decentralized reverse auction: waits for responder apps to submit bids.
+        BID_WAIT_SECONDS allows configuration of the auction duration.
+        """
+        bid_wait_seconds = float(os.environ.get("BID_WAIT_SECONDS", "3.0"))
+        poll_interval = 0.5
+        elapsed = 0.0
+        
+        valid_bids = []
+        while elapsed < bid_wait_seconds:
+            bids = self.repo.list_bids(incident_id)
+            valid_bids = [b for b in bids if _safe_float(b.get("score"), 0.0) > 0]
+            if len(valid_bids) >= 3:
+                # Early exit if we have enough bids
+                break
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+
         required_skill = str(incident.get("requiredSkill") or "general")
         severity = safe_get(incident, "severity", "provisional") or "low"
         confidence = _safe_float(safe_get(incident, "aiDetection", "confidence"), default=0.0)
-        responders = self.repo.list_responders()
         evaluated_at = isoformat_z(utcnow())
-        scored_qualified = [
-            score_responder(
-                responder=responder,
-                incident_location=incident.get("location"),
-                required_skill=required_skill,
-                severity=severity,
-            )
-            for responder in responders
-        ]
-        ranked_qualified = sorted([item for item in scored_qualified if item.score > 0], key=lambda item: item.score, reverse=True)
+        
+        ranked_bids = sorted(valid_bids, key=lambda x: _safe_float(x.get("score"), 0.0), reverse=True)
 
         fallback = False
         selected_id: str | None = None
         candidate_queue: list[str] = []
-        scored_for_diagnostics = scored_qualified
-        if ranked_qualified:
-            selected_id = ranked_qualified[0].uid
-            candidate_queue = [item.uid for item in ranked_qualified]
-            score_reason = "qualified_best_score"
+        
+        if ranked_bids:
+            selected_id = str(ranked_bids[0].get("responderId"))
+            candidate_queue = [str(b.get("responderId")) for b in ranked_bids]
+            score_reason = "decentralized_auction_winner"
         else:
-            scored_fallback = [
+            # Fallback to central logic if no bids received
+            responders = self.repo.list_responders()
+            scored_qualified = [
                 score_responder(
                     responder=responder,
                     incident_location=incident.get("location"),
@@ -228,8 +242,7 @@ class IncidentOrchestrator:
                 )
                 for responder in responders
             ]
-            scored_for_diagnostics = scored_fallback
-            ranked_fallback = sorted([item for item in scored_fallback if item.score > 0], key=lambda item: item.score, reverse=True)
+            ranked_fallback = sorted([item for item in scored_qualified if item.score > 0], key=lambda item: item.score, reverse=True)
             if ranked_fallback:
                 fallback = True
                 selected_id = ranked_fallback[0].uid
@@ -239,17 +252,23 @@ class IncidentOrchestrator:
                 score_reason = "no_available_responder"
 
         top_candidates = []
-        sorted_diag = sorted(scored_for_diagnostics, key=lambda item: item.score, reverse=True)
-        for item in sorted_diag[:3]:
-            candidate: dict[str, Any] = {
-                "id": item.uid,
-                "score": round(item.score, 8),
-                "distanceMeters": None if item.distance_m == float("inf") else round(item.distance_m, 2),
-                "qualified": bool(item.skill_match),
-            }
-            if item.score <= 0:
-                candidate["rejectedReason"] = item.reason
-            top_candidates.append(candidate)
+        if ranked_bids:
+            for bid in ranked_bids[:3]:
+                top_candidates.append({
+                    "id": bid.get("responderId"),
+                    "score": round(_safe_float(bid.get("score"), 0.0), 8),
+                    "distanceMeters": round(_safe_float(bid.get("distance"), 0.0), 2),
+                    "qualified": True,
+                })
+        else:
+            for item in sorted(scored_qualified, key=lambda item: item.score, reverse=True)[:3]:
+                top_candidates.append({
+                    "id": item.uid,
+                    "score": round(item.score, 8),
+                    "distanceMeters": None if item.distance_m == float("inf") else round(item.distance_m, 2),
+                    "qualified": bool(item.skill_match),
+                    "rejectedReason": item.reason if item.score <= 0 else None,
+                })
 
         retry_eligible = None
         allocation_status = "completed" if selected_id else ALLOCATION_STATUS_NO_CANDIDATE

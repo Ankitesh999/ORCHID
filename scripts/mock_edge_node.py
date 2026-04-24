@@ -75,14 +75,25 @@ def main() -> None:
     parser.add_argument("--image-path", default=None, help="Optional image file path")
     parser.add_argument("--lat", type=float, default=12.9717)
     parser.add_argument("--lng", type=float, default=77.5947)
+    parser.add_argument("--sensor", choices=["camera", "acoustic", "vitals"], default="camera", help="Type of sensor sending the event")
     args = parser.parse_args()
+
+    mock_label = args.mock_label
+    camera_id = args.camera_id
+
+    if args.sensor == "acoustic":
+        mock_label = "acoustic_distress_vocalization"
+        camera_id = "mic-hallway-02"
+    elif args.sensor == "vitals":
+        mock_label = "vitals_heart_rate_drop"
+        camera_id = "wearable-user-09"
 
     image_b64 = load_image_base64(args.image_path)
     image_mime_type = infer_mime_type(args.image_path)
     send_event(
         ingest_url=args.ingest_url,
-        camera_id=args.camera_id,
-        mock_label=args.mock_label,
+        camera_id=camera_id,
+        mock_label=mock_label,
         image_b64=image_b64,
         image_mime_type=image_mime_type,
         location={"lat": args.lat, "lng": args.lng},

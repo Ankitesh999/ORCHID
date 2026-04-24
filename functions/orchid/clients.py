@@ -52,6 +52,9 @@ class IncidentRepository(Protocol):
     def list_responders(self) -> list[dict[str, Any]]:
         ...
 
+    def list_bids(self, incident_id: str) -> list[dict[str, Any]]:
+        ...
+
     def allocate_initial_assignment(
         self,
         *,
@@ -231,6 +234,15 @@ class FirestoreIncidentRepository:
             data["uid"] = snap.id
             responders.append(data)
         return responders
+
+    def list_bids(self, incident_id: str) -> list[dict[str, Any]]:
+        bids: list[dict[str, Any]] = []
+        query = self._db.collection("incidents").document(incident_id).collection("bids")
+        for snap in query.stream():
+            data = snap.to_dict() or {}
+            data["id"] = snap.id
+            bids.append(data)
+        return bids
 
     def allocate_initial_assignment(
         self,
@@ -516,9 +528,30 @@ class GeminiEnrichmentClient:
             image_bytes = base64.b64decode(image_base64)
             parts.append(genai.types.Part.from_bytes(data=image_bytes, mime_type=image_mime_type))
 
+        from pydantic import BaseModel, Field
+        class TacticalReasoning(BaseModel):
+            safeApproach: str | None = None
+            hazards: list[str] = Field(default_factory=list)
+            victimCount: int | float | None = None
+            recommendedEquipment: list[str] = Field(default_factory=list)
+            priorityActions: list[str] = Field(default_factory=list)
+
+        class EnrichmentResponse(BaseModel):
+            classification: str
+            severity: str
+            confidence: float
+            summary: str
+            tacticalReasoning: TacticalReasoning | None = None
+
         try:
             client = genai.Client(vertexai=True, project=self._settings.project_id, location=self._settings.gemini_location)
-            response = client.models.generate_content(model=self._settings.gemini_model, contents=parts)
+            
+            config = genai.types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=EnrichmentResponse,
+                temperature=0.2,
+            )
+            response = client.models.generate_content(model=self._settings.gemini_model, contents=parts, config=config)
             parsed = _extract_json_dict(response.text or "")
             result: dict[str, Any] = {
                 "classification": parsed.get("classification", provisional),
@@ -680,6 +713,9 @@ class InMemoryIncidentRepository:
                     item["uid"] = uid
                     responders.append(item)
             return responders
+
+    def list_bids(self, incident_id: str) -> list[dict[str, Any]]:
+        return []
 
     def allocate_initial_assignment(
         self,
