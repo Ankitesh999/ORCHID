@@ -219,11 +219,6 @@ export function DashboardShell() {
       return;
     }
 
-    const responderId = event.dataTransfer.getData("text/responder-id");
-    if (!responderId) {
-      return;
-    }
-
     setPinInFlight(responderId);
     try {
       await updateDoc(doc(db, "users", responderId), {
