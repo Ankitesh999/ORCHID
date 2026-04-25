@@ -19,6 +19,22 @@ service cloud.firestore {
         ]);
     }
 
+    function responderBidWrite(bidId) {
+      return signedIn()
+        && role() == "responder"
+        && request.auth.uid == bidId
+        && request.resource.data.keys().hasOnly([
+          "responderId",
+          "timestamp",
+          "score",
+          "distance"
+        ])
+        && request.resource.data.responderId == request.auth.uid
+        && request.resource.data.timestamp is string
+        && request.resource.data.score is number
+        && request.resource.data.distance is number;
+    }
+
     match /users/{uid} {
       allow read: if signedIn() && (role() == "admin" || request.auth.uid == uid);
       allow create, delete: if signedIn() && role() == "admin";
@@ -31,7 +47,7 @@ service cloud.firestore {
 
       match /bids/{bidId} {
         allow read: if signedIn() && (role() == "admin" || role() == "responder");
-        allow create, update: if signedIn() && role() == "responder" && request.auth.uid == bidId;
+        allow create, update: if responderBidWrite(bidId);
       }
     }
 

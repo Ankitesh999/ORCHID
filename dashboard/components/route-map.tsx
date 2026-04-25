@@ -30,15 +30,9 @@ declare global {
 let scriptPromise: Promise<void> | null = null;
 
 function loadGoogleMaps(apiKey: string): Promise<void> {
-  if (typeof window === "undefined") {
-    return Promise.resolve();
-  }
-  if (window.google?.maps) {
-    return Promise.resolve();
-  }
-  if (scriptPromise) {
-    return scriptPromise;
-  }
+  if (typeof window === "undefined") return Promise.resolve();
+  if (window.google?.maps) return Promise.resolve();
+  if (scriptPromise) return scriptPromise;
 
   scriptPromise = new Promise((resolve, reject) => {
     const script = document.createElement("script");
@@ -56,15 +50,15 @@ function loadGoogleMaps(apiKey: string): Promise<void> {
 function FallbackMap({ origin, destination, indoorNote }: { origin: Coordinates | null; destination: Coordinates | null; indoorNote?: string }) {
   return (
     <div className="fallback-map">
-      <div className="map-icon">🗺️</div>
-      <div className="map-label">Simulated Route Map</div>
+      <div className="map-icon" aria-hidden="true">MAP</div>
+      <div className="map-label">Route Map</div>
       {origin && destination && (
         <div className="map-note">
-          Route: ({origin.lat.toFixed(4)}, {origin.lng.toFixed(4)}) → ({destination.lat.toFixed(4)}, {destination.lng.toFixed(4)})
+          Route: ({origin.lat.toFixed(4)}, {origin.lng.toFixed(4)}) to ({destination.lat.toFixed(4)}, {destination.lng.toFixed(4)})
         </div>
       )}
       {indoorNote && <div className="map-note">{indoorNote}</div>}
-      <div className="map-note" style={{ opacity: 0.6, fontSize: '11px' }}>
+      <div className="map-note" style={{ opacity: 0.6, fontSize: "11px" }}>
         Configure NEXT_PUBLIC_GOOGLE_MAPS_API_KEY for live routing.
       </div>
     </div>
@@ -84,7 +78,6 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
       return;
     }
 
-    // Google Maps fires this global callback when the API key is invalid
     (window as any).gm_authFailure = () => {
       setUseFallback(true);
       setError("Google Maps API key is invalid or restricted.");
@@ -94,15 +87,11 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
     let currentMap: any = null;
 
     async function renderRoute() {
-      if (!mapRef.current || !origin || !destination) {
-        return;
-      }
+      if (!mapRef.current || !origin || !destination) return;
 
       try {
         await loadGoogleMaps(apiKey);
-        if (!mounted || !mapRef.current || !window.google?.maps) {
-          return;
-        }
+        if (!mounted || !mapRef.current || !window.google?.maps) return;
 
         const googleMaps = window.google.maps;
         const map = new googleMaps.Map(mapRef.current, {
@@ -112,10 +101,10 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
           streetViewControl: false,
           fullscreenControl: false,
           styles: [
-            { elementType: "geometry", stylers: [{ color: "#1d2c4d" }] },
-            { elementType: "labels.text.fill", stylers: [{ color: "#8ec3b9" }] },
-            { elementType: "labels.text.stroke", stylers: [{ color: "#1a3646" }] },
-            { featureType: "road", elementType: "geometry", stylers: [{ color: "#304a7d" }] },
+            { elementType: "geometry", stylers: [{ color: "#172033" }] },
+            { elementType: "labels.text.fill", stylers: [{ color: "#a8b3c7" }] },
+            { elementType: "labels.text.stroke", stylers: [{ color: "#101827" }] },
+            { featureType: "road", elementType: "geometry", stylers: [{ color: "#273653" }] },
             { featureType: "water", elementType: "geometry", stylers: [{ color: "#0e1626" }] },
           ],
         });
@@ -124,8 +113,8 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
           map,
           suppressMarkers: false,
           polylineOptions: {
-            strokeColor: "#3b82f6",
-            strokeWeight: 6,
+            strokeColor: "#38bdf8",
+            strokeWeight: 5,
             strokeOpacity: 0.9,
           },
         });
@@ -139,9 +128,7 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
           (result: any, status: string) => {
             if (status === googleMaps.DirectionsStatus.OK && result) {
               directionsRenderer.setDirections(result);
-              if (mounted) {
-                setError(null);
-              }
+              if (mounted) setError(null);
             } else if (mounted) {
               setError(`Route unavailable (${status}).`);
             }
@@ -159,39 +146,30 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
 
     renderRoute().then(() => {
       if (!currentMap || !window.google?.maps || !mounted) return;
-      
-      // Clear old markers
-      markersRef.current.forEach(m => m.setMap(null));
+      markersRef.current.forEach((marker) => marker.setMap(null));
       markersRef.current = [];
 
-      // Add hazards
-      if (hazards && hazards.length > 0) {
-        hazards.forEach(hazard => {
-          try {
-            const color = hazard.type === 'fire' ? '#FF4444' : '#4488FF';
-            const circle = new window.google.maps.Circle({
-              strokeColor: color,
-              strokeOpacity: 0.9,
-              strokeWeight: 2,
-              fillColor: color,
-              fillOpacity: 0.3,
-              map: currentMap,
-              center: hazard.location,
-              radius: 25
-            });
-            markersRef.current.push(circle);
-          } catch (err) {
-            console.error("Failed to render hazard circle for", hazard.id, err);
-          }
+      (hazards || []).forEach((hazard) => {
+        const color = hazard.type === "fire" ? "#ef4444" : "#38bdf8";
+        const circle = new window.google.maps.Circle({
+          strokeColor: color,
+          strokeOpacity: 0.9,
+          strokeWeight: 2,
+          fillColor: color,
+          fillOpacity: 0.24,
+          map: currentMap,
+          center: hazard.location,
+          radius: 25,
         });
-      }
-    }).catch(err => {
+        markersRef.current.push(circle);
+      });
+    }).catch((err) => {
       console.error("Failed to render route and map", err);
     });
 
     return () => {
       mounted = false;
-      markersRef.current.forEach(m => m.setMap(null));
+      markersRef.current.forEach((marker) => marker.setMap(null));
       markersRef.current = [];
     };
   }, [apiKey, origin, destination, hazards]);

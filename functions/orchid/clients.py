@@ -10,12 +10,15 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from .models import (
+    AI_STATE_COMPLETED,
+    AI_STATE_MANUAL_TRIAGE,
     ALLOCATION_STATUS_COMPLETED,
     ALLOCATION_STATUS_PROCESSING,
     ENRICHMENT_COMPLETED,
     INCIDENT_STATUS_ACKNOWLEDGED,
     INCIDENT_STATUS_ASSIGNED,
     INCIDENT_STATUS_DETECTED,
+    INCIDENT_STATUS_TRIAGE_REQUIRED,
     INCIDENT_STATUS_UNACKED_ESCALATION,
     isoformat_z,
 )
@@ -103,6 +106,18 @@ class IncidentRepository(Protocol):
     def apply_enrichment(self, incident_id: str, enrichment: dict[str, Any], now_iso: str) -> dict[str, Any] | None:
         ...
 
+    def apply_manual_triage(
+        self,
+        incident_id: str,
+        *,
+        classification: str,
+        severity: str,
+        required_skill: str,
+        actor_id: str | None,
+        now_iso: str,
+    ) -> dict[str, Any] | None:
+        ...
+
 
 class EventPublisher(Protocol):
     def publish_json(self, topic_id: str, payload: dict[str, Any]) -> None:
@@ -160,7 +175,11 @@ class FirestoreIncidentRepository:
                 updates = {
                     "updatedAt": now_iso,
                     "cameraId": payload["cameraId"],
-                    "source": payload.get("source", "edge_mock_camera"),
+                    "source": payload.get("source", "browser_camera_capture"),
+                    "sourceType": payload.get("sourceType", current.get("sourceType", "camera_capture")),
+                    "status": payload.get("status", current.get("status", INCIDENT_STATUS_DETECTED)),
+                    "aiState": payload.get("aiState", current.get("aiState", AI_STATE_COMPLETED)),
+                    "triageRequired": payload.get("triageRequired", current.get("triageRequired", False)),
                     "classification.provisional": payload["classification"]["provisional"],
                     "severity.provisional": payload["severity"]["provisional"],
                     "requiredSkill": payload.get("requiredSkill", current.get("requiredSkill", "general")),
@@ -173,7 +192,10 @@ class FirestoreIncidentRepository:
                     },
                     "confidence.provisional": payload.get("confidence"),
                     "location": payload.get("location"),
+                    "audit": payload.get("audit", current.get("audit", {})),
                 }
+                if payload.get("triage"):
+                    updates["triage"] = payload["triage"]
                 txn.set(doc_ref, updates, merge=True)
                 merged = deepcopy(current)
                 _merge_nested(merged, updates)
@@ -181,9 +203,12 @@ class FirestoreIncidentRepository:
 
             doc = {
                 "requestId": request_id,
-                "status": INCIDENT_STATUS_DETECTED,
+                "status": payload.get("status", INCIDENT_STATUS_DETECTED),
                 "cameraId": payload["cameraId"],
-                "source": payload.get("source", "edge_mock_camera"),
+                "source": payload.get("source", "browser_camera_capture"),
+                "sourceType": payload.get("sourceType", "camera_capture"),
+                "aiState": payload.get("aiState", AI_STATE_COMPLETED),
+                "triageRequired": payload.get("triageRequired", False),
                 "classification": {"provisional": payload["classification"]["provisional"], "enriched": None},
                 "severity": {"provisional": payload["severity"]["provisional"], "enriched": None},
                 "confidence": {"provisional": payload.get("confidence"), "enriched": None},
@@ -211,6 +236,8 @@ class FirestoreIncidentRepository:
                     "scoreReason": None,
                     "inputSnapshot": None,
                 },
+                "audit": payload.get("audit", {}),
+                "triage": payload.get("triage", {"required": False}),
                 "enrichmentState": "pending",
                 "createdAt": now_iso,
                 "updatedAt": now_iso,
@@ -389,8 +416,12 @@ class FirestoreIncidentRepository:
             current = snap.to_dict() or {}
             if current.get("status") == INCIDENT_STATUS_ACKNOWLEDGED:
                 return current
+            if current.get("status") != INCIDENT_STATUS_ASSIGNED:
+                return current
             assigned = current.get("assignedResponderId")
-            if responder_id and assigned and responder_id != assigned:
+            if not assigned:
+                return current
+            if responder_id and responder_id != assigned:
                 return current
             updates = {
                 "status": INCIDENT_STATUS_ACKNOWLEDGED,
@@ -422,6 +453,38 @@ class FirestoreIncidentRepository:
             updates["tacticalReasoning"] = tactical
         if enrichment.get("error"):
             updates["enrichmentError"] = enrichment["error"]
+        doc_ref.set(updates, merge=True)
+        return self.get_incident(incident_id)
+
+    def apply_manual_triage(
+        self,
+        incident_id: str,
+        *,
+        classification: str,
+        severity: str,
+        required_skill: str,
+        actor_id: str | None,
+        now_iso: str,
+    ) -> dict[str, Any] | None:
+        doc_ref = self._db.collection("incidents").document(incident_id)
+        if not doc_ref.get().exists:
+            return None
+        updates = {
+            "status": INCIDENT_STATUS_DETECTED,
+            "aiState": AI_STATE_MANUAL_TRIAGE,
+            "triageRequired": False,
+            "readyForAllocation": True,
+            "assignmentPhase": "initial",
+            "classification.provisional": classification,
+            "severity.provisional": severity,
+            "requiredSkill": required_skill,
+            "triage.required": False,
+            "triage.resolvedAt": now_iso,
+            "triage.resolvedBy": actor_id,
+            "audit.classificationMode": "manual_triage",
+            "audit.triagedAt": now_iso,
+            "updatedAt": now_iso,
+        }
         doc_ref.set(updates, merge=True)
         return self.get_incident(incident_id)
 
@@ -581,21 +644,21 @@ class VertexDetectionClient:
         self._settings = settings
 
     def detect(self, payload: dict[str, Any]) -> dict[str, Any]:
-        mock_label = str(payload.get("mockLabel") or "possible_medical_distress")
         if not self._settings.enable_vertex_detection:
             return {
-                "label": mock_label,
-                "confidence": 0.5,
-                "evidenceSummary": "Vertex detection disabled; using mock label.",
+                "label": None,
+                "confidence": 0.0,
+                "evidenceSummary": "Live AI detection is disabled.",
+                "error": "vertex_detection_disabled",
             }
 
         try:
             from google import genai
         except Exception as exc:  # pragma: no cover
             return {
-                "label": mock_label,
-                "confidence": 0.5,
-                "evidenceSummary": "Vertex SDK unavailable; using mock label.",
+                "label": None,
+                "confidence": 0.0,
+                "evidenceSummary": "Live AI SDK is unavailable.",
                 "error": f"sdk_unavailable:{exc}",
             }
 
@@ -618,19 +681,19 @@ class VertexDetectionClient:
             client = genai.Client(vertexai=True, project=self._settings.project_id, location=self._settings.gemini_location)
             response = client.models.generate_content(model=self._settings.vertex_detection_model, contents=parts)
             raw_text = (response.text or "").strip()
-            parsed = json.loads(raw_text) if raw_text.startswith("{") else {}
+            parsed = json.loads(raw_text) if raw_text.startswith("{") else _extract_json_dict(raw_text)
             confidence = float(parsed.get("confidence", 0.5))
             return {
-                "label": parsed.get("label", mock_label),
+                "label": parsed.get("label"),
                 "confidence": confidence,
                 "evidenceSummary": parsed.get("evidenceSummary", "Vertex detection completed."),
             }
         except Exception as exc:  # pragma: no cover
             logger.exception("Vertex detection failed")
             return {
-                "label": mock_label,
-                "confidence": 0.5,
-                "evidenceSummary": "Vertex request failed; using mock label.",
+                "label": None,
+                "confidence": 0.0,
+                "evidenceSummary": "Live AI request failed.",
                 "error": str(exc),
             }
 
@@ -651,18 +714,29 @@ class InMemoryIncidentRepository:
             if request_id in self._incidents:
                 incident = self._incidents[request_id]
                 incident["updatedAt"] = now_iso
+                incident["status"] = payload.get("status", incident.get("status", INCIDENT_STATUS_DETECTED))
+                incident["source"] = payload.get("source", incident.get("source", "browser_camera_capture"))
+                incident["sourceType"] = payload.get("sourceType", incident.get("sourceType", "camera_capture"))
+                incident["aiState"] = payload.get("aiState", incident.get("aiState", AI_STATE_COMPLETED))
+                incident["triageRequired"] = payload.get("triageRequired", incident.get("triageRequired", False))
                 incident["classification"]["provisional"] = payload["classification"]["provisional"]
                 incident["severity"]["provisional"] = payload["severity"]["provisional"]
                 incident["requiredSkill"] = payload.get("requiredSkill", incident.get("requiredSkill", "general"))
                 incident["aiDetection"] = deepcopy(payload.get("aiDetection") or incident.get("aiDetection"))
                 incident["location"] = payload.get("location")
+                incident["audit"] = deepcopy(payload.get("audit") or incident.get("audit", {}))
+                if payload.get("triage"):
+                    incident["triage"] = deepcopy(payload["triage"])
                 return deepcopy(incident), False
 
             doc = {
                 "requestId": request_id,
-                "status": INCIDENT_STATUS_DETECTED,
+                "status": payload.get("status", INCIDENT_STATUS_DETECTED),
                 "cameraId": payload["cameraId"],
-                "source": payload.get("source", "edge_mock_camera"),
+                "source": payload.get("source", "browser_camera_capture"),
+                "sourceType": payload.get("sourceType", "camera_capture"),
+                "aiState": payload.get("aiState", AI_STATE_COMPLETED),
+                "triageRequired": payload.get("triageRequired", False),
                 "classification": {"provisional": payload["classification"]["provisional"], "enriched": None},
                 "severity": {"provisional": payload["severity"]["provisional"], "enriched": None},
                 "confidence": {"provisional": payload.get("confidence"), "enriched": None},
@@ -686,6 +760,8 @@ class InMemoryIncidentRepository:
                     "scoreReason": None,
                     "inputSnapshot": None,
                 },
+                "audit": deepcopy(payload.get("audit") or {}),
+                "triage": deepcopy(payload.get("triage") or {"required": False}),
                 "enrichmentState": "pending",
                 "createdAt": now_iso,
                 "updatedAt": now_iso,
@@ -824,8 +900,12 @@ class InMemoryIncidentRepository:
                 return None
             if incident.get("status") == INCIDENT_STATUS_ACKNOWLEDGED:
                 return deepcopy(incident)
+            if incident.get("status") != INCIDENT_STATUS_ASSIGNED:
+                return deepcopy(incident)
             assigned = incident.get("assignedResponderId")
-            if responder_id and assigned and responder_id != assigned:
+            if not assigned:
+                return deepcopy(incident)
+            if responder_id and responder_id != assigned:
                 return deepcopy(incident)
             incident["status"] = INCIDENT_STATUS_ACKNOWLEDGED
             incident["acknowledgedAt"] = now_iso
@@ -849,6 +929,42 @@ class InMemoryIncidentRepository:
             incident["updatedAt"] = now_iso
             if enrichment.get("error"):
                 incident["enrichmentError"] = enrichment["error"]
+            return deepcopy(incident)
+
+    def apply_manual_triage(
+        self,
+        incident_id: str,
+        *,
+        classification: str,
+        severity: str,
+        required_skill: str,
+        actor_id: str | None,
+        now_iso: str,
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            incident = self._incidents.get(incident_id)
+            if not incident:
+                return None
+            incident["status"] = INCIDENT_STATUS_DETECTED
+            incident["aiState"] = AI_STATE_MANUAL_TRIAGE
+            incident["triageRequired"] = False
+            incident["readyForAllocation"] = True
+            incident["assignmentPhase"] = "initial"
+            incident["classification"]["provisional"] = classification
+            incident["severity"]["provisional"] = severity
+            incident["requiredSkill"] = required_skill
+            incident["triage"] = {
+                **(incident.get("triage") or {}),
+                "required": False,
+                "resolvedAt": now_iso,
+                "resolvedBy": actor_id,
+            }
+            incident["audit"] = {
+                **(incident.get("audit") or {}),
+                "classificationMode": "manual_triage",
+                "triagedAt": now_iso,
+            }
+            incident["updatedAt"] = now_iso
             return deepcopy(incident)
 
 
@@ -902,7 +1018,7 @@ class InMemoryDetectionClient:
     def detect(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.calls.append(deepcopy(payload))
         return {
-            "label": payload.get("mockLabel") or "possible_medical_distress",
+            "label": payload.get("label") or "possible_medical_distress",
             "confidence": 0.72,
-            "evidenceSummary": "Mock detection executed.",
+            "evidenceSummary": "In-memory detector executed.",
         }

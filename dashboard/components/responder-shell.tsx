@@ -1,20 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState, useRef } from "react";
-import {
-  collection,
-  doc,
-  limit,
-  onSnapshot,
-  query,
-  where,
-} from "firebase/firestore";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { collection, doc, limit, onSnapshot, query, setDoc, where } from "firebase/firestore";
 import { User, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 
 import { auth, db } from "../lib/firebase";
 import { Incident } from "../lib/types";
 import { RouteMap } from "./route-map";
 import { enqueuePendingAck, flushPendingAcks, listPendingAcks } from "../lib/offline-ack-queue";
+import { playSirenDebounced } from "../lib/siren";
 
 const ACK_FUNCTION_URL = process.env.NEXT_PUBLIC_ACK_FUNCTION_URL ?? "";
 
@@ -45,27 +39,9 @@ function formatTime(value?: string | null) {
   return date.toLocaleTimeString();
 }
 
-function playAlertSound() {
-  try {
-    const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-    if (!AudioContext) return;
-    const ctx = new AudioContext();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.type = "square";
-    osc.frequency.setValueAtTime(440, ctx.currentTime);
-    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.1);
-    osc.frequency.setValueAtTime(440, ctx.currentTime + 0.2);
-    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.3);
-    
-    gain.gain.setValueAtTime(0.05, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
-    
-    osc.start();
-    osc.stop(ctx.currentTime + 0.5);
-  } catch (e) {}
+function displayValue(value?: string | null) {
+  if (!value) return "-";
+  return value.replaceAll("_", " ");
 }
 
 function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number) {
@@ -73,27 +49,25 @@ function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number)
   const rad = Math.PI / 180;
   const dLat = (lat2 - lat1) * rad;
   const dLng = (lng2 - lng1) * rad;
-  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-            Math.cos(lat1 * rad) * Math.cos(lat2 * rad) *
-            Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * rad) * Math.cos(lat2 * rad) *
+    Math.sin(dLng / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// ─── ACK COUNTDOWN RING ─────────────────────────────────────────────────────
-
 function AckCountdownRing({ ackDeadline }: { ackDeadline?: string | null }) {
-  const TOTAL_SECONDS = 15;
+  const totalSeconds = 15;
   const [secondsLeft, setSecondsLeft] = useState<number | null>(null);
 
   useEffect(() => {
-    if (!ackDeadline) { setSecondsLeft(null); return; }
-    const deadline = new Date(ackDeadline).getTime();
-
-    function tick() {
-      const remaining = Math.max(0, (deadline - Date.now()) / 1000);
-      setSecondsLeft(remaining);
+    if (!ackDeadline) {
+      setSecondsLeft(null);
+      return;
     }
-
+    const deadline = new Date(ackDeadline).getTime();
+    function tick() {
+      setSecondsLeft(Math.max(0, (deadline - Date.now()) / 1000));
+    }
     tick();
     const id = setInterval(tick, 500);
     return () => clearInterval(id);
@@ -101,68 +75,40 @@ function AckCountdownRing({ ackDeadline }: { ackDeadline?: string | null }) {
 
   if (secondsLeft === null) return null;
 
-  const pct = Math.min(1, secondsLeft / TOTAL_SECONDS);
+  const pct = Math.min(1, secondsLeft / totalSeconds);
   const radius = 44;
   const circumference = 2 * Math.PI * radius;
   const dashOffset = circumference * (1 - pct);
-
-  const color =
-    pct > 0.5 ? "#22c55e" :
-    pct > 0.25 ? "#f59e0b" : "#ef4444";
-
-  const isExpired = secondsLeft <= 0;
+  const color = pct > 0.5 ? "#22c55e" : pct > 0.25 ? "#f59e0b" : "#ef4444";
 
   return (
-    <div className="ack-ring-wrapper">
+    <div className="ack-ring-wrapper" aria-label={`${Math.ceil(secondsLeft)} seconds left to acknowledge`}>
       <svg className="ack-ring-svg" viewBox="0 0 100 100">
-        {/* Track */}
+        <circle cx="50" cy="50" r={radius} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="7" />
         <circle
-          cx="50" cy="50" r={radius}
-          fill="none"
-          stroke="rgba(255,255,255,0.08)"
-          strokeWidth="7"
-        />
-        {/* Progress */}
-        <circle
-          cx="50" cy="50" r={radius}
+          cx="50"
+          cy="50"
+          r={radius}
           fill="none"
           stroke={color}
           strokeWidth="7"
           strokeLinecap="round"
           strokeDasharray={circumference}
           strokeDashoffset={dashOffset}
-          style={{
-            transform: "rotate(-90deg)",
-            transformOrigin: "50% 50%",
-            transition: "stroke-dashoffset 0.5s linear, stroke 0.5s ease",
-            filter: `drop-shadow(0 0 6px ${color})`,
-          }}
+          style={{ transform: "rotate(-90deg)", transformOrigin: "50% 50%" }}
         />
-        {/* Label */}
-        <text x="50" y="44" textAnchor="middle" fill={color} fontSize="18" fontWeight="800" fontFamily="Inter,sans-serif">
-          {isExpired ? "!" : Math.ceil(secondsLeft)}
+        <text x="50" y="47" textAnchor="middle" fill={color} fontSize="20" fontWeight="800">
+          {secondsLeft <= 0 ? "0" : Math.ceil(secondsLeft)}
         </text>
-        <text x="50" y="59" textAnchor="middle" fill="rgba(255,255,255,0.4)" fontSize="8" fontFamily="Inter,sans-serif" letterSpacing="1">
-          {isExpired ? "EXPIRED" : "SECONDS"}
+        <text x="50" y="62" textAnchor="middle" fill="rgba(255,255,255,0.48)" fontSize="8">
+          SEC
         </text>
       </svg>
-      <span className="ack-ring-label" style={{ color }}>
-        {isExpired ? "DEADLINE PASSED" : "ACK WINDOW"}
-      </span>
     </div>
   );
 }
 
-// ─── TACTICAL BRIEF CARD ────────────────────────────────────────────────────
-
-const SEVERITY_COLORS: Record<string, string> = {
-  critical: "#ef4444",
-  high: "#f59e0b",
-  medium: "#3b82f6",
-  low: "#94a3b8",
-};
-
-function TacticalBriefCard({
+function FieldTaskCard({
   incident,
   ackInFlight,
   onAck,
@@ -172,111 +118,65 @@ function TacticalBriefCard({
   onAck: (id: string) => void;
 }) {
   const severity = incident.severity?.enriched || incident.severity?.provisional || "medium";
-  const classification = incident.classification?.enriched || incident.classification?.provisional || "-";
-  const sevColor = SEVERITY_COLORS[severity] ?? "#94a3b8";
+  const classification = incident.classification?.enriched || incident.classification?.provisional || "Incident";
   const isAssigned = incident.status === "assigned";
-  const isEscalated = incident.status === "unacked_escalation";
 
   return (
-    <article className={`card responder-incident tactical-brief ${isEscalated ? "tactical-brief-escalated" : ""}`}>
-      {/* Top bar */}
-      <div className="tactical-brief-topbar">
-        <div className="tactical-brief-id">
-          <span className="tactical-brief-id-label">INCIDENT ID</span>
-          <span className="tactical-brief-id-val">{incident.id}</span>
+    <article className="card responder-incident field-task-card">
+      <div className="field-task-header">
+        <div>
+          <span className="field-label">Current assignment</span>
+          <h2>{displayValue(classification)}</h2>
+          <p>{incident.id}</p>
         </div>
-        <div className="tactical-brief-status-group">
-          <span className={`status status-${incident.status || "unknown"}`}>
-            {incident.status || "unknown"}
-          </span>
-          <span className="tactical-sev-badge" style={{ background: `${sevColor}22`, color: sevColor, borderColor: `${sevColor}44` }}>
-            {severity.toUpperCase()}
-          </span>
-        </div>
+        <span className={`severity-badge severity-${severity}`}>{severity.toUpperCase()}</span>
       </div>
 
-      {/* Main content row */}
-      <div className="tactical-brief-body">
-        {/* Left: countdown ring */}
+      <div className="field-task-body">
         <AckCountdownRing ackDeadline={incident.ackDeadline} />
-
-        {/* Right: intel */}
-        <div className="tactical-brief-intel">
-          <div className="tactical-intel-row">
-            <span className="tactical-intel-key">Classification</span>
-            <span className="tactical-intel-val">{classification}</span>
-          </div>
-          <div className="tactical-intel-row">
-            <span className="tactical-intel-key">Required Skill</span>
-            <span className="tactical-intel-val">{incident.requiredSkill || "general"}</span>
-          </div>
-          <div className="tactical-intel-row">
-            <span className="tactical-intel-key">Ack Deadline</span>
-            <span className="tactical-intel-val">{formatTime(incident.ackDeadline)}</span>
-          </div>
-          {incident.aiDetection?.evidenceSummary && (
-            <div className="tactical-intel-evidence">
-              <span className="tactical-intel-key">Evidence</span>
-              <span className="tactical-intel-evidence-text">{incident.aiDetection.evidenceSummary}</span>
-            </div>
-          )}
+        <div className="field-task-grid">
+          <p><strong>Status</strong><span>{displayValue(incident.status)}</span></p>
+          <p><strong>Required skill</strong><span>{displayValue(incident.requiredSkill || "general")}</span></p>
+          <p><strong>Ack deadline</strong><span>{formatTime(incident.ackDeadline)}</span></p>
+          <p><strong>AI state</strong><span>{displayValue(incident.aiState || "completed")}</span></p>
         </div>
       </div>
 
-      {/* Tactical actions */}
+      {incident.aiDetection?.evidenceSummary && (
+        <div className="field-brief">
+          <strong>Evidence</strong>
+          <p>{incident.aiDetection.evidenceSummary}</p>
+        </div>
+      )}
+
       {(incident.tacticalReasoning?.priorityActions?.length ?? 0) > 0 && (
-        <div className="tactical-actions-strip">
-          <span className="tactical-actions-label">🎯 PRIORITY ACTIONS</span>
+        <div className="field-brief">
+          <strong>Priority actions</strong>
           <div className="tactical-actions-pills">
-            {(incident.tacticalReasoning?.priorityActions ?? []).map((action: string, i: number) => (
-              <span key={i} className="tactical-action-pill">{action}</span>
+            {(incident.tacticalReasoning?.priorityActions ?? []).map((action) => (
+              <span key={action} className="tactical-action-pill">{action}</span>
             ))}
           </div>
         </div>
       )}
 
-      {/* Hazards */}
-      {(incident.tacticalReasoning?.hazards?.length ?? 0) > 0 && (
-        <div className="tactical-hazards-strip">
-          <span className="tactical-actions-label">⚠ KNOWN HAZARDS</span>
-          <div className="tactical-actions-pills">
-            {(incident.tacticalReasoning?.hazards ?? []).map((h: string, i: number) => (
-              <span key={i} className="tactical-hazard-pill">{h}</span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Safe approach */}
       {incident.tacticalReasoning?.safeApproach && (
-        <div className="tactical-approach">
-          <span className="tactical-intel-key">🟢 Safe Approach</span>
-          <p className="tactical-approach-text">{incident.tacticalReasoning.safeApproach}</p>
+        <div className="field-brief">
+          <strong>Approach</strong>
+          <p>{incident.tacticalReasoning.safeApproach}</p>
         </div>
       )}
 
-      {/* Accept button */}
       <button
         className="accept-button"
         onClick={() => onAck(incident.id)}
         disabled={!isAssigned || ackInFlight === incident.id}
       >
-        {ackInFlight === incident.id ? (
-          <>
-            <span className="accept-spinner" />
-            Transmitting Acceptance...
-          </>
-        ) : isAssigned ? (
-          "✓ Accept & Dispatch"
-        ) : (
-          `Status: ${incident.status}`
-        )}
+        {ackInFlight === incident.id ? "Sending acceptance..." : isAssigned ? "Accept Assignment" : `Status: ${displayValue(incident.status)}`}
       </button>
     </article>
   );
 }
-
-// ─── RESPONDER SHELL ────────────────────────────────────────────────────────
 
 export function ResponderShell() {
   const [user, setUser] = useState<User | null>(null);
@@ -290,22 +190,24 @@ export function ResponderShell() {
   const [isOnline, setIsOnline] = useState<boolean>(typeof navigator === "undefined" ? true : navigator.onLine);
   const [pendingCount, setPendingCount] = useState(0);
   const [hazards, setHazards] = useState<HazardPin[]>([]);
+  const [crisisActive, setCrisisActive] = useState(false);
+  const [crisisLabel, setCrisisLabel] = useState("");
   const biddedIncidents = useRef<Set<string>>(new Set());
-  const previousActiveRef = useRef<string | null>(null);
-  const [isFlashing, setIsFlashing] = useState(false);
+  const seenAssignedRef = useRef<Set<string>>(new Set());
+  const crisisTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (next) => {
       setUser(next);
       setLoading(false);
-      if (!next) { setProfile(null); setIncidents([]); return; }
+      if (!next) {
+        setProfile(null);
+        setIncidents([]);
+        return;
+      }
       const token = await next.getIdTokenResult(true).catch(() => null);
       const role = token?.claims?.role;
-      if (role !== "responder" && role !== "admin") {
-        setError("This account is not authorized for responder mode.");
-      } else {
-        setError(null);
-      }
+      setError(role !== "responder" && role !== "admin" ? "This account is not authorized for responder mode." : null);
     });
     return () => unsubscribe();
   }, []);
@@ -313,7 +215,10 @@ export function ResponderShell() {
   useEffect(() => {
     if (!user) return;
     const unsubProfile = onSnapshot(doc(db, "users", user.uid), (snap) => {
-      if (!snap.exists()) { setProfile({ uid: user.uid, role: "responder" }); return; }
+      if (!snap.exists()) {
+        setProfile({ uid: user.uid, role: "responder" });
+        return;
+      }
       const data = snap.data();
       setProfile({
         uid: user.uid,
@@ -333,11 +238,27 @@ export function ResponderShell() {
         const rows: Incident[] = snapshot.docs
           .map((item) => ({ id: item.id, ...(item.data() as Omit<Incident, "id">) }))
           .sort((a, b) => Date.parse(String(b.createdAt || 0)) - Date.parse(String(a.createdAt || 0)));
+        // Detect new assignments for alert
+        for (const row of rows) {
+          if (row.status === "assigned" && !seenAssignedRef.current.has(row.id)) {
+            const label = row.classification?.enriched || row.classification?.provisional || "New Assignment";
+            setCrisisActive(true);
+            setCrisisLabel(label.replaceAll("_", " ").toUpperCase());
+            playSirenDebounced();
+            if (crisisTimerRef.current) clearTimeout(crisisTimerRef.current);
+            crisisTimerRef.current = setTimeout(() => setCrisisActive(false), 8000);
+            break;
+          }
+        }
+        seenAssignedRef.current = new Set(rows.map((r) => r.id));
         setIncidents(rows);
       },
       (err) => setError(`Failed to load assignments: ${err.message}`)
     );
-    return () => { unsubProfile(); unsubIncidents(); };
+    return () => {
+      unsubProfile();
+      unsubIncidents();
+    };
   }, [user]);
 
   useEffect(() => {
@@ -346,38 +267,35 @@ export function ResponderShell() {
     const unsubOpen = onSnapshot(openQuery, (snapshot) => {
       snapshot.docs.forEach((docSnap) => {
         const incident = docSnap.data();
-        if (incident.readyForAllocation && incident.assignmentPhase === "initial") {
-          if (biddedIncidents.current.has(docSnap.id)) return;
-          biddedIncidents.current.add(docSnap.id);
-          import("firebase/firestore").then(({ setDoc, doc }) => {
-            const bidRef = doc(db, "incidents", docSnap.id, "bids", user.uid);
-            let score = 0, distance = Infinity;
-            if (profile.lastKnownLocation && incident.location) {
-              const lat1 = Number(profile.lastKnownLocation.lat);
-              const lng1 = Number(profile.lastKnownLocation.lng);
-              const lat2 = Number(incident.location.lat);
-              const lng2 = Number(incident.location.lng);
-              if (!Number.isNaN(lat1) && !Number.isNaN(lng1) && !Number.isNaN(lat2) && !Number.isNaN(lng2)) {
-                distance = Math.max(1, haversineMeters(lat1, lng1, lat2, lng2));
-                const requiredSkill = incident.requiredSkill || "general";
-                const hasSkill = requiredSkill === "general" || (profile.skills && profile.skills.includes(requiredSkill));
-                let severityWeight = 1.0;
-                const sev = incident.severity?.provisional || "medium";
-                if (sev === "critical") severityWeight = 2.0;
-                else if (sev === "high") severityWeight = 1.5;
-                else if (sev === "low") severityWeight = 0.7;
-                const skillWeight = hasSkill ? 1.0 : 0.5;
-                if (profile.availability !== false) score = (1.0 / distance) * severityWeight * skillWeight;
-              }
-            }
-            setDoc(bidRef, {
-              responderId: user.uid,
-              timestamp: new Date().toISOString(),
-              score, distance,
-              bidderProfile: profile,
-            }, { merge: true }).catch(console.error);
-          });
+        if (!incident.readyForAllocation || incident.assignmentPhase !== "initial") return;
+        if (biddedIncidents.current.has(docSnap.id)) return;
+        biddedIncidents.current.add(docSnap.id);
+
+        let score = 0;
+        let distance = 0;
+        if (profile.lastKnownLocation && incident.location) {
+          const lat1 = Number(profile.lastKnownLocation.lat);
+          const lng1 = Number(profile.lastKnownLocation.lng);
+          const lat2 = Number(incident.location.lat);
+          const lng2 = Number(incident.location.lng);
+          if (!Number.isNaN(lat1) && !Number.isNaN(lng1) && !Number.isNaN(lat2) && !Number.isNaN(lng2)) {
+            distance = Math.max(1, haversineMeters(lat1, lng1, lat2, lng2));
+            const requiredSkill = incident.requiredSkill || "general";
+            const hasSkill = requiredSkill === "general" || (profile.skills || []).includes(requiredSkill);
+            const severity = incident.severity?.provisional || "medium";
+            const severityWeight = severity === "critical" ? 2.0 : severity === "high" ? 1.5 : severity === "low" ? 0.7 : 1.0;
+            const skillWeight = hasSkill ? 1.0 : 0.5;
+            if (profile.availability !== false) score = (1.0 / distance) * severityWeight * skillWeight;
+          }
         }
+
+        const bidRef = doc(db, "incidents", docSnap.id, "bids", user.uid);
+        setDoc(bidRef, {
+          responderId: user.uid,
+          timestamp: new Date().toISOString(),
+          score,
+          distance: Number.isFinite(distance) ? distance : 0,
+        }, { merge: true }).catch(console.error);
       });
     });
     return () => unsubOpen();
@@ -386,7 +304,7 @@ export function ResponderShell() {
   useEffect(() => {
     const hazardQuery = query(collection(db, "hazards"), limit(50));
     const unsubHazards = onSnapshot(hazardQuery, (snapshot) => {
-      setHazards(snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() as Omit<HazardPin, "id">) })));
+      setHazards(snapshot.docs.map((entry) => ({ id: entry.id, ...(entry.data() as Omit<HazardPin, "id">) })));
     });
     return () => unsubHazards();
   }, []);
@@ -397,11 +315,14 @@ export function ResponderShell() {
     const handleOnline = async () => {
       setIsOnline(true);
       const result = await flushPendingAcks(ACK_FUNCTION_URL);
-      if (result.failed > 0) setError(`Synced ${result.flushed} queued actions, ${result.failed} still pending.`);
+      if (result.failed > 0) setError(`Synced ${result.flushed} queued actions; ${result.failed} still pending.`);
       else if (result.flushed > 0) setError(null);
       syncPendingCount();
     };
-    const handleOffline = () => { setIsOnline(false); syncPendingCount(); };
+    const handleOffline = () => {
+      setIsOnline(false);
+      syncPendingCount();
+    };
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
     return () => {
@@ -414,18 +335,6 @@ export function ResponderShell() {
     () => incidents.find((item) => item.status === "assigned") || incidents[0] || null,
     [incidents]
   );
-
-  useEffect(() => {
-    const currActiveId = activeIncident?.id || null;
-    if (currActiveId && currActiveId !== previousActiveRef.current) {
-      setIsFlashing(true);
-      playAlertSound();
-      const timer = setTimeout(() => setIsFlashing(false), 3000);
-      previousActiveRef.current = currActiveId;
-      return () => clearTimeout(timer);
-    }
-    previousActiveRef.current = currActiveId;
-  }, [activeIncident]);
 
   async function onSignIn(event: React.FormEvent) {
     event.preventDefault();
@@ -465,7 +374,7 @@ export function ResponderShell() {
     } catch {
       enqueuePendingAck(incidentId, user.uid);
       setPendingCount(listPendingAcks().length);
-      setError("Network unstable. Acceptance queued — will sync automatically.");
+      setError("Network unstable. Acceptance queued and will sync automatically.");
     } finally {
       setAckInFlight(null);
     }
@@ -476,7 +385,7 @@ export function ResponderShell() {
       <main className="responder-shell">
         <div className="responder-loading">
           <div className="responder-loading-ring" />
-          <p>Connecting to ORCHID mesh...</p>
+          <p>Connecting to ORCHID...</p>
         </div>
       </main>
     );
@@ -487,10 +396,10 @@ export function ResponderShell() {
       <main className="responder-shell">
         <section className="card responder-auth-card">
           <h1>ORCHID Responder</h1>
-          <p>Sign in using a responder account to receive real-time tasks.</p>
+          <p>Sign in using a responder account to receive assignments.</p>
           <form onSubmit={onSignIn}>
-            <label>Email <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></label>
-            <label>Password <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required /></label>
+            <label>Email <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></label>
+            <label>Password <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
             <button type="submit">Sign In</button>
           </form>
           {error && <p className="error">{error}</p>}
@@ -510,27 +419,26 @@ export function ResponderShell() {
       : null;
 
   return (
-    <main className={`responder-shell ${isFlashing ? "crisis-active" : ""}`}>
-      {isFlashing && (
-        <>
-          <div className="crisis-overlay active" />
-          <div className="crisis-banner">
-            <span className="crisis-icon">⚠</span>
-            NEW ASSIGNMENT RECEIVED
-            <span className="crisis-icon">⚠</span>
-          </div>
-        </>
+    <main className="responder-shell" role="main" aria-label="ORCHID Responder Dashboard">
+      {/* Crisis flash overlay and banner */}
+      <div className={`crisis-overlay ${crisisActive ? "active" : ""}`} />
+      {crisisActive && (
+        <div className="crisis-banner" onClick={() => setCrisisActive(false)}>
+          <span className="crisis-icon">🚨</span>
+          NEW ASSIGNMENT — {crisisLabel}
+          <span className="crisis-icon">🚨</span>
+          <button className="crisis-dismiss" onClick={() => setCrisisActive(false)}>DISMISS</button>
+        </div>
       )}
-      {/* Offline mesh banner */}
+
       {!isOnline && (
-        <div className="responder-offline-banner">
-          <span className="responder-offline-icon">⚡</span>
-          MESH MODE — Actions queued locally. Will sync when signal is restored.
+        <div className="responder-offline-banner" role="status">
+          Offline mode. Actions are queued locally and will sync on reconnect.
           {pendingCount > 0 && <span className="responder-offline-queue">{pendingCount} pending</span>}
         </div>
       )}
 
-      <header className="responder-topbar card">
+      <header className="responder-topbar card" role="banner">
         <div>
           <h1>ORCHID Responder</h1>
           <p>{profile?.displayName || user.email}</p>
@@ -538,41 +446,26 @@ export function ResponderShell() {
         <button onClick={() => signOut(auth)}>Sign Out</button>
       </header>
 
-      {/* Status pill bar */}
-      <section className="responder-status-bar card">
+      <section className="responder-status-bar card" aria-label="Responder status overview">
         <div className={`responder-status-pill ${isOnline ? "rsp-online" : "rsp-offline"}`}>
           <span className="rsp-dot" />
-          {isOnline ? "ONLINE" : "OFFLINE"}
+          {isOnline ? "Online" : "Offline"}
         </div>
-        <div className="responder-status-pill rsp-neutral">
-          <span>📋</span>
-          {incidents.length} TASK{incidents.length !== 1 ? "S" : ""}
-        </div>
-        <div className={`responder-status-pill ${pendingCount > 0 ? "rsp-warning" : "rsp-neutral"}`}>
-          <span>⏳</span>
-          {pendingCount} QUEUED
-        </div>
-        <div className="responder-status-pill rsp-neutral">
-          <span>📍</span>
-          {origin ? `${origin.lat.toFixed(4)}, ${origin.lng.toFixed(4)}` : "NO GPS"}
-        </div>
+        <div className="responder-status-pill rsp-neutral">{incidents.length} tasks</div>
+        <div className={`responder-status-pill ${pendingCount > 0 ? "rsp-warning" : "rsp-neutral"}`}>{pendingCount} queued</div>
+        <div className="responder-status-pill rsp-neutral">{origin ? `${origin.lat.toFixed(4)}, ${origin.lng.toFixed(4)}` : "No GPS"}</div>
       </section>
 
       {error && <p className="error inline">{error}</p>}
 
       {activeIncident ? (
-        <TacticalBriefCard
-          incident={activeIncident}
-          ackInFlight={ackInFlight}
-          onAck={acknowledge}
-        />
+        <FieldTaskCard incident={activeIncident} ackInFlight={ackInFlight} onAck={acknowledge} />
       ) : (
         <article className="card responder-incident">
           <div className="responder-standby">
-            <div className="responder-standby-pulse" />
             <div>
-              <p className="responder-standby-title">STANDBY</p>
-              <p className="responder-standby-sub">Monitoring for incident assignments...</p>
+              <p className="responder-standby-title">Standby</p>
+              <p className="responder-standby-sub">Monitoring for incident assignments.</p>
             </div>
           </div>
         </article>
@@ -583,7 +476,7 @@ export function ResponderShell() {
         origin={origin}
         destination={destination}
         hazards={hazards}
-        indoorNote="Indoor path is mocked for this MVP. Follow nearest building entry after campus route ends."
+        indoorNote="Indoor path is estimated for this MVP. Follow site safety protocol after arrival."
       />
     </main>
   );
