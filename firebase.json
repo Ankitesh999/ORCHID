@@ -1,6 +1,9 @@
 {
   "hosting": {
-    "public": "dashboard/out",
+    "source": "dashboard",
+    "frameworksBackend": {
+      "region": "us-central1"
+    },
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
     "cleanUrls": true
   },
