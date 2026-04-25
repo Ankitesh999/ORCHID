@@ -83,6 +83,9 @@ class IncidentOrchestrator:
         image_base64 = raw.get("imageBase64")
         image_mime_type = raw.get("imageMimeType")
         location = raw.get("location")
+        source_type = str(raw.get("sourceType", "camera_capture")).strip() or "camera_capture"
+        volume = raw.get("volume")
+        confidence = raw.get("confidence")
 
         if not request_id:
             raise ValueError("requestId is required")
@@ -90,7 +93,7 @@ class IncidentOrchestrator:
             raise ValueError("cameraId is required")
         if not timestamp:
             raise ValueError("timestamp is required")
-        if not image_ref and not image_base64:
+        if source_type != "microphone" and not image_ref and not image_base64:
             raise ValueError("imageRef or imageBase64 is required")
         if location is not None and not isinstance(location, dict):
             raise ValueError("location must be an object with lat/lng")
@@ -103,12 +106,59 @@ class IncidentOrchestrator:
             image_base64=image_base64,
             image_mime_type=image_mime_type,
             location=location,
+            source_type=source_type,
+            volume=_safe_float(volume, default=0.0) if volume is not None else None,
+            confidence=_safe_float(confidence, default=0.0) if confidence is not None else None,
         )
 
     def ingest_http(self, raw: dict[str, Any]) -> dict[str, Any]:
         payload = self.parse_ingest_payload(raw)
         now = utcnow()
         now_iso = isoformat_z(now)
+
+        if payload.source_type == "microphone":
+            confidence = payload.confidence if payload.confidence is not None else min(0.99, max(0.5, (payload.volume or 0) / 100))
+            severity = "critical" if (payload.volume or 0) >= 92 else "high"
+            fast_event = {
+                "requestId": payload.request_id,
+                "cameraId": payload.camera_id,
+                "timestamp": payload.timestamp,
+                "source": "browser_microphone",
+                "sourceType": "microphone",
+                "status": INCIDENT_STATUS_DETECTED,
+                "aiState": AI_STATE_COMPLETED,
+                "triageRequired": False,
+                "classification": {"provisional": "acoustic_anomaly"},
+                "severity": {"provisional": severity},
+                "requiredSkill": "security",
+                "readyForAllocation": True,
+                "assignmentPhase": ASSIGNMENT_PHASE_INITIAL,
+                "aiDetection": {
+                    "label": "acoustic_anomaly",
+                    "confidence": confidence,
+                    "evidenceSummary": f"Microphone anomaly detected at volume {payload.volume or 0:.0f}.",
+                },
+                "confidence": confidence,
+                "location": payload.location,
+                "audit": {
+                    "rawImagePersisted": False,
+                    "ingestedAt": now_iso,
+                    "classificationMode": "audio_threshold",
+                    "privacyMode": "audio_features_only",
+                },
+            }
+            self.publisher.publish_json(self.settings.fast_topic, fast_event)
+            return {
+                "requestId": payload.request_id,
+                "acceptedAt": now_iso,
+                "published": True,
+                "classification": "acoustic_anomaly",
+                "severity": severity,
+                "requiredSkill": "security",
+                "confidence": confidence,
+                "topics": [self.settings.fast_topic],
+            }
+
         detection = self.detector.detect(
             {
                 "requestId": payload.request_id,

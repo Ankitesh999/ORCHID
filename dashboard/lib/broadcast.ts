@@ -5,6 +5,7 @@
 
 export const CAMERA_CHANNEL_NAME = "orchid-camera-feed";
 export const DETECTION_CHANNEL_NAME = "orchid-detection-events";
+export const MIC_CHANNEL_NAME = "orchid-mic-feed";
 
 export type CameraFrameMessage = {
   type: "frame";
@@ -37,7 +38,32 @@ export type CameraStatusMessage = {
   cameraId: string;
 };
 
+export type MicFrequencyMessage = {
+  type: "mic_frequency";
+  frequencyData: number[];
+  volume: number;
+  ts: number;
+  micId: string;
+};
+
+export type MicStatusMessage = {
+  type: "mic_status";
+  active: boolean;
+  micId: string;
+};
+
+export type MicAnomalyMessage = {
+  type: "mic_anomaly";
+  detected: boolean;
+  volume: number;
+  confidence: number;
+  label: string;
+  ts: number;
+  micId: string;
+};
+
 export type BroadcastMessage = CameraFrameMessage | DetectionEventMessage | CameraStatusMessage;
+export type MicBroadcastMessage = MicFrequencyMessage | MicStatusMessage | MicAnomalyMessage;
 
 /**
  * Create a BroadcastChannel for camera frames.
@@ -51,4 +77,9 @@ export function createCameraChannel(): BroadcastChannel | null {
 export function createDetectionChannel(): BroadcastChannel | null {
   if (typeof BroadcastChannel === "undefined") return null;
   return new BroadcastChannel(DETECTION_CHANNEL_NAME);
+}
+
+export function createMicChannel(): BroadcastChannel | null {
+  if (typeof BroadcastChannel === "undefined") return null;
+  return new BroadcastChannel(MIC_CHANNEL_NAME);
 }

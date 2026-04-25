@@ -4,8 +4,10 @@ import { useEffect, useRef, useState } from "react";
 import {
   createCameraChannel,
   createDetectionChannel,
+  createMicChannel,
   type BroadcastMessage,
   type DetectionEventMessage,
+  type MicBroadcastMessage,
 } from "../lib/broadcast";
 
 type DetectionState = {
@@ -16,15 +18,23 @@ type DetectionState = {
   inferenceMs: number;
 };
 
-function AcousticWaveform({ alert }: { alert?: boolean }) {
-  const bars = 20;
+type MicState = {
+  active: boolean;
+  frequencyData: number[];
+  volume: number;
+  alert: boolean;
+  lastTs: number | null;
+};
+
+function AcousticWaveform({ alert, frequencyData, active }: { alert?: boolean; frequencyData?: number[]; active?: boolean }) {
+  const values = active && frequencyData?.length ? frequencyData.slice(0, 32) : Array.from({ length: 20 }, () => 0);
   return (
-    <div className="acoustic-waveform">
-      {Array.from({ length: bars }).map((_, i) => (
+    <div className={`acoustic-waveform ${active ? "acoustic-waveform-live" : ""}`}>
+      {values.map((value, i) => (
         <div
           key={i}
           className={`waveform-bar ${alert ? "waveform-bar-active" : ""}`}
-          style={{ animationDelay: `${i * 0.06}s` }}
+          style={active ? { height: `${Math.max(8, (value / 255) * 100)}%` } : { animationDelay: `${i * 0.06}s` }}
         />
       ))}
     </div>
@@ -41,8 +51,40 @@ function VitalsLine({ alert }: { alert?: boolean }) {
         <circle className="vitals-dot" cx="160" cy="30" r="3" />
       </svg>
       <span className={`vitals-label ${alert ? "vitals-label-alert" : ""}`}>
-        {alert ? "⚠ CRITICAL — 42 BPM" : "72 BPM — NORMAL"}
+        {alert ? "⚠ CRITICAL — 42 BPM" : "74 BPM — NORMAL"}
       </span>
+    </div>
+  );
+}
+
+function PassiveDetectionBox() {
+  const [pos, setPos] = useState({ x: 30, y: 30, w: 20, h: 30 });
+
+  useEffect(() => {
+    const updatePos = () => {
+      setPos({
+        x: 15 + Math.random() * 50,
+        y: 15 + Math.random() * 40,
+        w: 15 + Math.random() * 20,
+        h: 20 + Math.random() * 30,
+      });
+    };
+    updatePos();
+    const interval = setInterval(updatePos, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    <div
+      className="passive-bbox"
+      style={{
+        left: `${pos.x}%`,
+        top: `${pos.y}%`,
+        width: `${pos.w}%`,
+        height: `${pos.h}%`,
+      }}
+    >
+      <span className="passive-bbox-label">AI SCANNING...</span>
     </div>
   );
 }
@@ -60,20 +102,22 @@ const FEEDS: FeedConfig[] = [
   { id: "CAM-01", label: "📷 CAM-01", zone: "LOBBY-EAST", type: "camera", isLive: true },
   { id: "CAM-02", label: "📷 CAM-02", zone: "CORRIDOR-A", type: "camera" },
   { id: "CAM-03", label: "📷 CAM-03", zone: "EAST-WING", type: "camera" },
-  { id: "CAM-04", label: "📷 CAM-04", zone: "EXIT-BLOCK", type: "camera", alertDemo: true },
+  { id: "CAM-04", label: "📷 CAM-04", zone: "EXIT-BLOCK", type: "camera" },
   { id: "MIC-01", label: "🎙 MIC-01", zone: "CORRIDOR-A", type: "acoustic" },
   { id: "MIC-02", label: "🎙 MIC-02", zone: "LOBBY", type: "acoustic" },
   { id: "VTL-01", label: "❤ VTL-01", zone: "GUEST-W12", type: "vitals" },
   { id: "VTL-02", label: "❤ VTL-02", zone: "STAFF-S04", type: "vitals" },
 ];
 
-function FeedCard({ config, liveFrame, detection }: {
+function FeedCard({ config, liveFrame, detection, mic }: {
   config: FeedConfig;
   liveFrame: string | null;
   detection: DetectionState | null;
+  mic: MicState;
 }) {
   const isLiveActive = config.isLive && !!liveFrame;
-  const hasAlert = config.isLive ? detection?.detected : config.alertDemo;
+  const isMic01 = config.id === "MIC-01";
+  const hasAlert = config.isLive ? detection?.detected : isMic01 ? mic.alert : config.alertDemo;
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -135,14 +179,38 @@ function FeedCard({ config, liveFrame, detection }: {
                 <span className="alert-text">⚠ PERSON DOWN — AI DETECTION</span>
               </>
             )}
+            {!config.isLive && !config.alertDemo && ["CAM-02", "CAM-03", "CAM-04"].includes(config.id) && (
+              <PassiveDetectionBox />
+            )}
           </>
         )}
-        {config.type === "acoustic" && <AcousticWaveform alert={config.alertDemo} />}
-        {config.type === "vitals" && <VitalsLine alert={config.id === "VTL-01"} />}
+        {config.type === "acoustic" && (
+          isMic01 || config.alertDemo ? (
+            <AcousticWaveform
+              alert={isMic01 ? mic.alert : config.alertDemo}
+              frequencyData={isMic01 ? mic.frequencyData : undefined}
+              active={isMic01 ? mic.active : false}
+            />
+          ) : (
+            <span className="pf-idle-text">NO SIGNAL</span>
+          )
+        )}
+        {config.type === "vitals" && <VitalsLine alert={config.alertDemo} />}
       </div>
 
       <div className="pf-footer">
-        {config.isLive && detection ? (
+        {isMic01 ? (
+          <>
+            <span>{mic.alert ? "ALERT" : mic.active ? "LIVE" : "NO SIGNAL"}</span>
+            <div className="pf-conf-track">
+              <div
+                className={`pf-conf-fill ${mic.alert ? "pf-conf-fill-alert" : ""}`}
+                style={{ width: `${mic.active ? mic.volume : 0}%` }}
+              />
+            </div>
+            <span className={`pf-conf-pct ${mic.alert ? "pf-conf-pct-alert" : ""}`}>{mic.active ? `${mic.volume}%` : "-"}</span>
+          </>
+        ) : config.isLive && detection ? (
           <>
             <span>{detection.detected ? "⚠ ALERT" : "✓ CLEAR"}</span>
             <div className="pf-conf-track">
@@ -177,10 +245,18 @@ export function PerceptionTier() {
   const [liveFrame, setLiveFrame] = useState<string | null>(null);
   const [cameraActive, setCameraActive] = useState(false);
   const [detection, setDetection] = useState<DetectionState | null>(null);
+  const [mic, setMic] = useState<MicState>({
+    active: false,
+    frequencyData: [],
+    volume: 0,
+    alert: false,
+    lastTs: null,
+  });
 
   useEffect(() => {
     const camCh = createCameraChannel();
     const detCh = createDetectionChannel();
+    const micCh = createMicChannel();
 
     if (camCh) {
       camCh.onmessage = (ev: MessageEvent<BroadcastMessage>) => {
@@ -206,9 +282,45 @@ export function PerceptionTier() {
       };
     }
 
+    if (micCh) {
+      micCh.onmessage = (ev: MessageEvent<MicBroadcastMessage>) => {
+        const message = ev.data;
+        switch (message.type) {
+          case "mic_status":
+            setMic((current) => ({
+              ...current,
+              active: message.active,
+              frequencyData: message.active ? current.frequencyData : [],
+              volume: message.active ? current.volume : 0,
+              alert: message.active ? current.alert : false,
+            }));
+            break;
+          case "mic_frequency":
+            setMic({
+              active: true,
+              frequencyData: message.frequencyData,
+              volume: message.volume,
+              alert: message.volume >= 78,
+              lastTs: message.ts,
+            });
+            break;
+          case "mic_anomaly":
+            setMic((current) => ({
+              ...current,
+              active: true,
+              volume: message.volume,
+              alert: message.detected,
+              lastTs: message.ts,
+            }));
+            break;
+        }
+      };
+    }
+
     return () => {
       camCh?.close();
       detCh?.close();
+      micCh?.close();
     };
   }, []);
 
@@ -220,8 +332,9 @@ export function PerceptionTier() {
           <span className={`pf-pill ${cameraActive ? "pf-pill-green" : "pf-pill-red"}`}>
             {cameraActive ? "EDGE NODE LIVE" : "EDGE OFFLINE"}
           </span>
+          <span className={`pf-pill ${mic.active ? "pf-pill-green" : "pf-pill-purple"}`}>{mic.active ? "MIC LIVE" : "MIC STANDBY"}</span>
           <span className="pf-pill pf-pill-purple">8 SENSORS</span>
-          {detection?.detected && <span className="pf-pill pf-pill-red">ANOMALY ACTIVE</span>}
+          {(detection?.detected || mic.alert) && <span className="pf-pill pf-pill-red">ANOMALY ACTIVE</span>}
         </div>
       </div>
       <div className="perception-feeds-grid">
@@ -231,6 +344,7 @@ export function PerceptionTier() {
             config={feed}
             liveFrame={feed.isLive ? liveFrame : null}
             detection={feed.isLive ? detection : null}
+            mic={mic}
           />
         ))}
       </div>

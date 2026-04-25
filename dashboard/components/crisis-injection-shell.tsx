@@ -7,9 +7,13 @@ import { auth } from "../lib/firebase";
 import {
   createCameraChannel,
   createDetectionChannel,
+  createMicChannel,
   type CameraFrameMessage,
   type DetectionEventMessage,
   type CameraStatusMessage,
+  type MicAnomalyMessage,
+  type MicFrequencyMessage,
+  type MicStatusMessage,
 } from "../lib/broadcast";
 
 const INGEST_URL = process.env.NEXT_PUBLIC_INGEST_FUNCTION_URL ?? "";
@@ -36,6 +40,9 @@ const MOTION_THRESHOLD = 30; // pixel diff threshold
 const MOTION_PIXEL_RATIO = 0.02; // 2% of pixels must change
 const DETECTION_FPS = 2;
 const AUTO_COOLDOWN_MS = 8000; // min time between auto-captures
+const MIC_SAMPLE_MS = 100;
+const MIC_ANOMALY_THRESHOLD = 78;
+const MIC_AUTO_COOLDOWN_MS = 15000;
 
 function makeId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -66,6 +73,12 @@ export function CrisisInjectionShell() {
   const [autoDetect, setAutoDetect] = useState(false);
   const [detection, setDetection] = useState<DetectionResult | null>(null);
   const [autoCaptures, setAutoCaptures] = useState(0);
+  const [micActive, setMicActive] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
+  const [micVolume, setMicVolume] = useState(0);
+  const [micFrequencyData, setMicFrequencyData] = useState<number[]>([]);
+  const [micAnomaly, setMicAnomaly] = useState(false);
+  const [micAutoCaptures, setMicAutoCaptures] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -77,7 +90,13 @@ export function CrisisInjectionShell() {
   const animFrameRef = useRef<number | null>(null);
   const cameraChannelRef = useRef<BroadcastChannel | null>(null);
   const detectionChannelRef = useRef<BroadcastChannel | null>(null);
+  const micChannelRef = useRef<BroadcastChannel | null>(null);
   const broadcastCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const micIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastMicIncidentRef = useRef(0);
 
   // Keep autoDetect ref in sync
   useEffect(() => {
@@ -99,17 +118,23 @@ export function CrisisInjectionShell() {
   useEffect(() => {
     cameraChannelRef.current = createCameraChannel();
     detectionChannelRef.current = createDetectionChannel();
+    micChannelRef.current = createMicChannel();
     return () => {
       // Notify SOC that camera is offline
       cameraChannelRef.current?.postMessage({ type: "status", active: false, cameraId: "browser-camera-01" } satisfies CameraStatusMessage);
+      micChannelRef.current?.postMessage({ type: "mic_status", active: false, micId: "MIC-01" } satisfies MicStatusMessage);
       cameraChannelRef.current?.close();
       detectionChannelRef.current?.close();
+      micChannelRef.current?.close();
     };
   }, []);
 
   useEffect(() => {
     return () => {
       streamRef.current?.getTracks().forEach((track) => track.stop());
+      micStreamRef.current?.getTracks().forEach((track) => track.stop());
+      audioContextRef.current?.close().catch(() => undefined);
+      if (micIntervalRef.current) clearInterval(micIntervalRef.current);
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     };
   }, []);
@@ -160,6 +185,97 @@ export function CrisisInjectionShell() {
       const message = err instanceof Error ? err.message : "Camera permission denied.";
       setCameraError(message);
       appendLog("error", `Camera unavailable: ${message}`);
+    }
+  }
+
+  async function startMicrophone() {
+    setMicError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      micStreamRef.current?.getTracks().forEach((track) => track.stop());
+      micStreamRef.current = stream;
+
+      const AudioContextCtor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextCtor) throw new Error("Web Audio API is unavailable.");
+
+      await audioContextRef.current?.close().catch(() => undefined);
+      const audioContext = new AudioContextCtor();
+      const source = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.72;
+      source.connect(analyser);
+
+      audioContextRef.current = audioContext;
+      analyserRef.current = analyser;
+      setMicActive(true);
+      appendLog("success", "Microphone stream ready. Acoustic anomaly detection active.");
+      micChannelRef.current?.postMessage({ type: "mic_status", active: true, micId: "MIC-01" } satisfies MicStatusMessage);
+
+      if (micIntervalRef.current) clearInterval(micIntervalRef.current);
+      micIntervalRef.current = setInterval(sampleMicrophone, MIC_SAMPLE_MS);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Microphone permission denied.";
+      setMicError(message);
+      appendLog("error", `Microphone unavailable: ${message}`);
+    }
+  }
+
+  function stopMicrophone() {
+    micStreamRef.current?.getTracks().forEach((track) => track.stop());
+    micStreamRef.current = null;
+    if (micIntervalRef.current) clearInterval(micIntervalRef.current);
+    micIntervalRef.current = null;
+    audioContextRef.current?.close().catch(() => undefined);
+    audioContextRef.current = null;
+    analyserRef.current = null;
+    setMicActive(false);
+    setMicVolume(0);
+    setMicAnomaly(false);
+    setMicFrequencyData([]);
+    micChannelRef.current?.postMessage({ type: "mic_status", active: false, micId: "MIC-01" } satisfies MicStatusMessage);
+    appendLog("info", "Microphone stream stopped.");
+  }
+
+  function sampleMicrophone() {
+    const analyser = analyserRef.current;
+    if (!analyser) return;
+    const bins = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteFrequencyData(bins);
+    const frequencyData = Array.from(bins);
+    const rms = Math.sqrt(frequencyData.reduce((sum, value) => sum + value * value, 0) / Math.max(1, frequencyData.length));
+    const volume = Math.min(100, Math.round((rms / 255) * 140));
+    const anomaly = volume >= MIC_ANOMALY_THRESHOLD;
+    const now = Date.now();
+    const confidence = Math.min(99, Math.max(55, Math.round(volume * 1.05)));
+
+    setMicFrequencyData(frequencyData);
+    setMicVolume(volume);
+    setMicAnomaly(anomaly);
+    micChannelRef.current?.postMessage({
+      type: "mic_frequency",
+      frequencyData,
+      volume,
+      ts: now,
+      micId: "MIC-01",
+    } satisfies MicFrequencyMessage);
+
+    if (anomaly) {
+      micChannelRef.current?.postMessage({
+        type: "mic_anomaly",
+        detected: true,
+        volume,
+        confidence,
+        label: "ACOUSTIC ANOMALY",
+        ts: now,
+        micId: "MIC-01",
+      } satisfies MicAnomalyMessage);
+    }
+
+    if (anomaly && INGEST_URL && now - lastMicIncidentRef.current > MIC_AUTO_COOLDOWN_MS) {
+      lastMicIncidentRef.current = now;
+      appendLog("detect", `MIC AUTO-DETECT: volume ${volume} - submitting acoustic incident...`);
+      void autoFireMicIncident(volume, confidence);
     }
   }
 
@@ -394,6 +510,40 @@ export function CrisisInjectionShell() {
     }
   }
 
+  async function autoFireMicIncident(volume: number, confidence: number) {
+    if (!INGEST_URL) return;
+    try {
+      const requestId = `mic-auto-${Math.floor(Date.now() / 1000)}-${Math.random().toString(36).slice(2, 10)}`;
+      const payload = {
+        requestId,
+        cameraId: "MIC-01",
+        source: "browser_microphone",
+        sourceType: "microphone",
+        timestamp: isoNow(),
+        location: DEFAULT_LOCATION,
+        volume,
+        confidence: confidence / 100,
+      };
+
+      appendLog("send", `MIC POST ${INGEST_URL.slice(0, 56)}...`);
+      const response = await fetch(INGEST_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        appendLog("error", `MIC HTTP ${response.status}: ${data.message || data.error || "Unknown error"}`);
+        return;
+      }
+      appendLog("success", `Acoustic incident accepted: ${data.classification || requestId}`);
+      setShotCount((count) => count + 1);
+      setMicAutoCaptures((count) => count + 1);
+    } catch (err) {
+      appendLog("error", err instanceof Error ? err.message : "Mic auto-submit failed.");
+    }
+  }
+
   async function fireEvent() {
     if (!INGEST_URL) {
       appendLog("error", "NEXT_PUBLIC_INGEST_FUNCTION_URL is not configured.");
@@ -496,6 +646,8 @@ export function CrisisInjectionShell() {
         <div className="inject-topbar-right">
           {shotCount > 0 && <span className="inject-shot-badge">{shotCount} submitted</span>}
           {autoCaptures > 0 && <span className="inject-auto-badge">{autoCaptures} auto</span>}
+          {micAutoCaptures > 0 && <span className="inject-auto-badge">{micAutoCaptures} mic</span>}
+          <span className={`mic-status-pill ${micActive ? "mic-status-live" : ""}`}>{micActive ? "MIC LIVE" : "MIC OFF"}</span>
           <span className="inject-user">{user.email}</span>
           <button className="button-subtle" onClick={() => signOut(auth)}>Sign Out</button>
           <a href="/" className="inject-nav-link">SOC Dashboard</a>
@@ -584,6 +736,42 @@ export function CrisisInjectionShell() {
               <img src={lastFrame} alt="Last submitted incident frame preview" />
             </div>
           )}
+
+          <section className={`mic-capture-panel ${micAnomaly ? "mic-capture-alert" : ""}`}>
+            <div className="inject-section-title">
+              <span className="inject-section-num">02</span>
+              Live Microphone Feed - Acoustic Node
+            </div>
+            <p className="inject-section-sub">
+              {micActive
+                ? "Streaming frequency features to SOC. Loud acoustic anomalies auto-submit incidents with cooldown protection."
+                : "Start the microphone to stream acoustic features and detect loud anomalies."}
+            </p>
+            <div className="mic-meter-row">
+              <div className="mic-spectrum" aria-label="Microphone frequency spectrum">
+                {(micFrequencyData.length ? micFrequencyData.slice(0, 32) : Array.from({ length: 32 }, () => 0)).map((value, index) => (
+                  <span
+                    key={`${index}-${value}`}
+                    style={{ height: `${Math.max(4, (value / 255) * 100)}%` }}
+                    className={micAnomaly ? "mic-bar-alert" : ""}
+                  />
+                ))}
+              </div>
+              <div className="mic-volume-readout">
+                <strong>{micVolume}</strong>
+                <span>volume</span>
+              </div>
+            </div>
+            {micError && <p className="error inline">{micError}</p>}
+            <div className="live-capture-actions">
+              <button type="button" className="button-subtle" onClick={micActive ? stopMicrophone : startMicrophone}>
+                {micActive ? "Stop Microphone" : "Start Microphone"}
+              </button>
+              <span className={`mic-anomaly-label ${micAnomaly ? "mic-anomaly-active" : ""}`}>
+                {micAnomaly ? "ACOUSTIC ALERT" : "CLEAR"}
+              </span>
+            </div>
+          </section>
         </section>
 
         <section className="inject-log-panel">
