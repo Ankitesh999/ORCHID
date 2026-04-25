@@ -25,6 +25,7 @@ provider "google-beta" {
 locals {
   services = [
     "artifactregistry.googleapis.com",
+    "cloudbilling.googleapis.com",
     "cloudbuild.googleapis.com",
     "cloudfunctions.googleapis.com",
     "cloudtasks.googleapis.com",
