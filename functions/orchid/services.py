@@ -8,6 +8,9 @@ from typing import Any
 
 from .clients import AckScheduler, DetectionClient, EnrichmentClient, EventPublisher, IncidentRepository
 from .models import (
+    AI_STATE_COMPLETED,
+    AI_STATE_FAILED,
+    AI_STATE_MANUAL_TRIAGE,
     ALLOCATION_STATUS_NO_CANDIDATE,
     ASSIGNMENT_PHASE_INITIAL,
     ASSIGNMENT_PHASE_RETRY,
@@ -15,6 +18,7 @@ from .models import (
     INCIDENT_STATUS_ACKNOWLEDGED,
     INCIDENT_STATUS_ASSIGNED,
     INCIDENT_STATUS_DETECTED,
+    INCIDENT_STATUS_TRIAGE_REQUIRED,
     INCIDENT_STATUS_UNACKED_ESCALATION,
     IngestPayload,
     isoformat_z,
@@ -27,7 +31,7 @@ from .settings import AppSettings
 
 def _normalize_label(value: str | None) -> str:
     if not value:
-        return "possible_medical_distress"
+        return "unclassified_incident"
     return re.sub(r"\s+", "_", value.strip().lower())
 
 
@@ -78,7 +82,6 @@ class IncidentOrchestrator:
         image_ref = raw.get("imageRef")
         image_base64 = raw.get("imageBase64")
         image_mime_type = raw.get("imageMimeType")
-        mock_label = raw.get("mockLabel")
         location = raw.get("location")
 
         if not request_id:
@@ -99,12 +102,13 @@ class IncidentOrchestrator:
             image_ref=image_ref,
             image_base64=image_base64,
             image_mime_type=image_mime_type,
-            mock_label=mock_label,
             location=location,
         )
 
     def ingest_http(self, raw: dict[str, Any]) -> dict[str, Any]:
         payload = self.parse_ingest_payload(raw)
+        now = utcnow()
+        now_iso = isoformat_z(now)
         detection = self.detector.detect(
             {
                 "requestId": payload.request_id,
@@ -112,10 +116,56 @@ class IncidentOrchestrator:
                 "imageRef": payload.image_ref,
                 "imageBase64": payload.image_base64,
                 "imageMimeType": payload.image_mime_type,
-                "mockLabel": payload.mock_label,
             }
         )
-        detection_label = _normalize_label(str(detection.get("label") or payload.mock_label))
+
+        if detection.get("error") or not detection.get("label"):
+            triage_event = {
+                "requestId": payload.request_id,
+                "cameraId": payload.camera_id,
+                "timestamp": payload.timestamp,
+                "source": "browser_camera_capture",
+                "sourceType": "camera_capture",
+                "status": INCIDENT_STATUS_TRIAGE_REQUIRED,
+                "aiState": AI_STATE_FAILED,
+                "triageRequired": True,
+                "classification": {"provisional": "unclassified_incident"},
+                "severity": {"provisional": "medium"},
+                "requiredSkill": "general",
+                "readyForAllocation": False,
+                "assignmentPhase": ASSIGNMENT_PHASE_INITIAL,
+                "aiDetection": {
+                    "label": None,
+                    "confidence": 0.0,
+                    "evidenceSummary": "Live AI classification failed. Manual triage is required before dispatch.",
+                },
+                "confidence": 0.0,
+                "location": payload.location,
+                "audit": {
+                    "rawImagePersisted": False,
+                    "ingestedAt": now_iso,
+                    "classificationMode": "live_ai",
+                    "privacyMode": "data_minimization",
+                },
+                "triage": {
+                    "required": True,
+                    "reason": "ai_classification_failed",
+                    "safeError": str(detection.get("error") or "missing_ai_label")[:240],
+                },
+            }
+            self.publisher.publish_json(self.settings.fast_topic, triage_event)
+            return {
+                "requestId": payload.request_id,
+                "acceptedAt": now_iso,
+                "published": True,
+                "status": INCIDENT_STATUS_TRIAGE_REQUIRED,
+                "aiState": AI_STATE_FAILED,
+                "triageRequired": True,
+                "message": "Live AI classification failed; manual triage is required.",
+                "topics": [self.settings.fast_topic],
+            }
+
+        detection_label = _normalize_label(str(detection.get("label")))
         confidence = _safe_float(detection.get("confidence"), default=0.0)
         required_skill = required_skill_from_detection(
             label=detection_label,
@@ -128,14 +178,16 @@ class IncidentOrchestrator:
             threshold=self.settings.vertex_detection_confidence_threshold,
         )
         evidence_summary = str(detection.get("evidenceSummary") or "")
-        now = utcnow()
-        now_iso = isoformat_z(now)
 
         fast_event = {
             "requestId": payload.request_id,
             "cameraId": payload.camera_id,
             "timestamp": payload.timestamp,
-            "source": "edge_mock_camera",
+            "source": "browser_camera_capture",
+            "sourceType": "camera_capture",
+            "status": INCIDENT_STATUS_DETECTED,
+            "aiState": AI_STATE_COMPLETED,
+            "triageRequired": False,
             "classification": {"provisional": normalize_detection_label(detection_label)},
             "severity": {"provisional": severity},
             "requiredSkill": required_skill,
@@ -148,6 +200,12 @@ class IncidentOrchestrator:
             },
             "confidence": confidence,
             "location": payload.location,
+            "audit": {
+                "rawImagePersisted": False,
+                "ingestedAt": now_iso,
+                "classificationMode": "live_ai",
+                "privacyMode": "data_minimization",
+            },
         }
         enrich_event = {
             "requestId": payload.request_id,
@@ -321,6 +379,26 @@ class IncidentOrchestrator:
             responder_id=responder_id,
             now_iso=isoformat_z(utcnow()),
         )
+
+    def apply_manual_triage(
+        self,
+        *,
+        incident_id: str,
+        classification: str,
+        severity: str,
+        required_skill: str,
+        actor_id: str | None,
+    ) -> dict[str, Any] | None:
+        if hasattr(self.repo, "apply_manual_triage"):
+            return self.repo.apply_manual_triage(
+                incident_id,
+                classification=normalize_detection_label(classification),
+                severity=severity,
+                required_skill=required_skill,
+                actor_id=actor_id,
+                now_iso=isoformat_z(utcnow()),
+            )
+        return None
 
     def check_ack_deadline(self, *, incident_id: str, assignment_attempt: int) -> dict[str, Any]:
         incident = self.repo.get_incident(incident_id)

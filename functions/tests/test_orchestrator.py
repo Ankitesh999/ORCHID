@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 
 from orchid.clients import (
@@ -39,6 +40,7 @@ def build_settings() -> AppSettings:
 
 class IncidentOrchestratorTests(unittest.TestCase):
     def setUp(self):
+        os.environ["BID_WAIT_SECONDS"] = "0"
         self.repo = InMemoryIncidentRepository()
         self.publisher = InMemoryPublisher()
         self.scheduler = InMemoryAckScheduler()
@@ -56,14 +58,22 @@ class IncidentOrchestratorTests(unittest.TestCase):
     def seed_responders(self, responders: list[dict[str, object]]) -> None:
         self.repo.seed_users(responders)
 
-    def ingest_and_persist(self, request_id: str, mock_label: str = "medical_distress") -> None:
+    def ingest_and_persist(self, request_id: str, label: str = "medical_distress") -> None:
+        class FixedDetection(InMemoryDetectionClient):
+            def detect(self, payload: dict[str, object]) -> dict[str, object]:
+                return {
+                    "label": label,
+                    "confidence": 0.72,
+                    "evidenceSummary": "In-memory detector executed.",
+                }
+
+        self.service.detector = FixedDetection()
         self.service.ingest_http(
             {
                 "requestId": request_id,
                 "cameraId": "cam-01",
                 "timestamp": "2026-04-22T10:00:00Z",
                 "imageRef": "gs://mock-bucket/frame.jpg",
-                "mockLabel": mock_label,
                 "location": {"lat": 12.9717, "lng": 77.5947},
             }
         )
@@ -137,7 +147,6 @@ class IncidentOrchestratorTests(unittest.TestCase):
                 "cameraId": "cam-01",
                 "timestamp": "2026-04-22T10:00:00Z",
                 "imageRef": "gs://mock-bucket/frame.jpg",
-                "mockLabel": "fire",
                 "location": {"lat": 12.9717, "lng": 77.5947},
             }
         )
@@ -145,6 +154,83 @@ class IncidentOrchestratorTests(unittest.TestCase):
         fast_event = self.publisher.published[-2]["payload"]
         self.assertEqual(fast_event["requiredSkill"], "general")
         self.assertEqual(fast_event["severity"]["provisional"], "low")
+
+    def test_ai_failure_creates_manual_triage_incident_without_raw_image(self):
+        class FailedDetection(InMemoryDetectionClient):
+            def detect(self, payload: dict[str, object]) -> dict[str, object]:
+                return {
+                    "label": None,
+                    "confidence": 0.0,
+                    "evidenceSummary": "Live AI request failed.",
+                    "error": "model_unavailable",
+                }
+
+        self.service.detector = FailedDetection()
+        result = self.service.ingest_http(
+            {
+                "requestId": "req-ai-fail",
+                "cameraId": "browser-camera-01",
+                "timestamp": "2026-04-22T10:00:00Z",
+                "imageBase64": "aW1hZ2U=",
+                "imageMimeType": "image/jpeg",
+                "location": {"lat": 12.9717, "lng": 77.5947},
+            }
+        )
+        self.assertEqual(result["status"], "triage_required")
+        self.assertTrue(result["triageRequired"])
+        self.assertEqual(len(self.publisher.published), 1)
+
+        fast_event = self.publisher.published[0]["payload"]
+        self.assertNotIn("imageBase64", fast_event)
+        self.assertFalse(fast_event["audit"]["rawImagePersisted"])
+        incident = self.service.persist_fast_event(fast_event)
+        self.assertEqual(incident["status"], "triage_required")
+        self.assertFalse(incident["readyForAllocation"])
+
+    def test_manual_triage_releases_incident_for_allocation(self):
+        self.seed_responders(
+            [
+                {
+                    "uid": "resp-a",
+                    "role": "responder",
+                    "availability": True,
+                    "skills": ["cpr_certified"],
+                    "lastKnownLocation": {"lat": 12.9716, "lng": 77.5946},
+                }
+            ]
+        )
+
+        class FailedDetection(InMemoryDetectionClient):
+            def detect(self, payload: dict[str, object]) -> dict[str, object]:
+                return {"label": None, "confidence": 0.0, "error": "timeout"}
+
+        self.service.detector = FailedDetection()
+        self.service.ingest_http(
+            {
+                "requestId": "req-triage-release",
+                "cameraId": "browser-camera-01",
+                "timestamp": "2026-04-22T10:00:00Z",
+                "imageBase64": "aW1hZ2U=",
+                "imageMimeType": "image/jpeg",
+                "location": {"lat": 12.9717, "lng": 77.5947},
+            }
+        )
+        self.service.persist_fast_event(self.publisher.published[0]["payload"])
+        triaged = self.service.apply_manual_triage(
+            incident_id="req-triage-release",
+            classification="medical_distress",
+            severity="high",
+            required_skill="cpr_certified",
+            actor_id="admin-a",
+        )
+        self.assertIsNotNone(triaged)
+        self.assertEqual(triaged["status"], "detected")
+        self.assertEqual(triaged["aiState"], "manual_triage")
+        self.assertFalse(triaged["triageRequired"])
+
+        assigned = self.service.allocate_initial_assignment(incident_id="req-triage-release")
+        self.assertEqual(assigned["status"], "assigned")
+        self.assertEqual(assigned["assignedResponderId"], "resp-a")
 
     def test_missing_responder_location_rejected_reason(self):
         self.seed_responders(
@@ -175,7 +261,7 @@ class IncidentOrchestratorTests(unittest.TestCase):
                 }
             ]
         )
-        self.ingest_and_persist("req-fallback", mock_label="fire")
+        self.ingest_and_persist("req-fallback", label="fire")
 
         fallback_result = self.service.allocate_initial_assignment(incident_id="req-fallback")
         self.assertEqual(fallback_result["status"], "assigned")
@@ -243,6 +329,26 @@ class IncidentOrchestratorTests(unittest.TestCase):
 
         check = self.service.check_ack_deadline(incident_id="req-ack-1", assignment_attempt=1)
         self.assertEqual(check["status"], "already_acknowledged")
+
+    def test_wrong_responder_cannot_ack_assignment(self):
+        self.seed_responders(
+            [
+                {
+                    "uid": "resp-a",
+                    "role": "responder",
+                    "availability": True,
+                    "skills": ["cpr_certified"],
+                    "lastKnownLocation": {"lat": 12.9716, "lng": 77.5946},
+                }
+            ]
+        )
+        self.ingest_and_persist("req-wrong-ack")
+        incident = self.service.allocate_initial_assignment(incident_id="req-wrong-ack")
+
+        acked = self.service.acknowledge(incident_id="req-wrong-ack", responder_id="resp-b")
+        self.assertIsNotNone(acked)
+        self.assertEqual(acked["status"], "assigned")
+        self.assertIsNone(acked["acknowledgedAt"])
 
 
 if __name__ == "__main__":

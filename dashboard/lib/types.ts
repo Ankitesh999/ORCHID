@@ -3,6 +3,23 @@ export type Incident = {
   requestId?: string;
   status?: string;
   source?: string;
+  sourceType?: "camera_capture" | "edge_node" | "manual" | string;
+  aiState?: "classifying" | "completed" | "failed" | "manual_triage" | string;
+  triageRequired?: boolean;
+  triage?: {
+    required?: boolean;
+    reason?: string;
+    safeError?: string;
+    resolvedAt?: string;
+    resolvedBy?: string | null;
+  };
+  audit?: {
+    rawImagePersisted?: boolean;
+    ingestedAt?: string;
+    classificationMode?: "live_ai" | "manual_triage" | string;
+    privacyMode?: string;
+    triagedAt?: string;
+  };
   cameraId?: string;
   readyForAllocation?: boolean;
   assignmentPhase?: "initial" | "retry" | string;

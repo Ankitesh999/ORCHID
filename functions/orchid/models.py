@@ -6,9 +6,16 @@ from typing import Any
 
 
 INCIDENT_STATUS_DETECTED = "detected"
+INCIDENT_STATUS_AI_CLASSIFYING = "ai_classifying"
+INCIDENT_STATUS_TRIAGE_REQUIRED = "triage_required"
 INCIDENT_STATUS_ASSIGNED = "assigned"
 INCIDENT_STATUS_ACKNOWLEDGED = "acknowledged"
 INCIDENT_STATUS_UNACKED_ESCALATION = "unacked_escalation"
+
+AI_STATE_CLASSIFYING = "classifying"
+AI_STATE_COMPLETED = "completed"
+AI_STATE_FAILED = "failed"
+AI_STATE_MANUAL_TRIAGE = "manual_triage"
 
 ASSIGNMENT_PHASE_INITIAL = "initial"
 ASSIGNMENT_PHASE_RETRY = "retry"
@@ -38,7 +45,6 @@ class IngestPayload:
     image_ref: str | None
     image_base64: str | None
     image_mime_type: str | None
-    mock_label: str | None
     location: dict[str, float] | None
 
 

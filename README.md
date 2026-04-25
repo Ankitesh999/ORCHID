@@ -1,7 +1,20 @@
-# ORCHID Local Development
+# ORCHID: Offline-first Response and Crisis Handling Intelligent Dispatch
 
-This README is focused on local setup and demo flow only.
+ORCHID is a decentralized, AI-driven emergency response platform built for the Google Solution Challenge 2026.
 
+## Hackathon Judging Criteria
+
+- **Technical Complexity**: Event-driven ingestion, Firestore realtime sync, responder bidding, retry-aware assignment, Cloud Tasks acknowledgement checks, and offline acknowledgement replay.
+- **AI Integration**: Browser camera intake sends live image evidence to the backend for Gemini/Vertex-style classification. If live AI fails, the incident is held for manual triage instead of silently using simulated labels.
+- **Security & Privacy**: Firebase Auth custom claims separate admin and responder roles. Incident records use data minimization: classification metadata is persisted, while raw camera frames are not stored by default.
+- **Design & User Flow**: The admin SOC console focuses on incident queueing, AI provenance, manual triage, assignment rationale, and responder readiness. The responder view focuses on the current field task and offline-safe acknowledgement.
+- **Problem Definition**: ORCHID targets crisis coordination breakdowns in hotels, campuses, and venues where staff location, skill fit, network reliability, and fast acknowledgement affect response quality.
+
+---
+
+## Local Development
+
+This README is focused on local setup and demo flow.
 ## Prerequisites
 
 - Node.js 20+
@@ -58,6 +71,7 @@ App routes:
 
 - Admin dashboard: `/`
 - Responder app: `/responder`
+- Live camera intake: `/inject`
 
 ## 5) Run backend tests
 
@@ -74,9 +88,11 @@ python -m unittest discover -s tests -p "test_*.py"
 python scripts/seed_users_and_claims.py --project-id YOUR_PROJECT_ID --users-json scripts/seed_users.sample.json
 ```
 
-## 7) Send demo incidents
+## 7) Send incidents
 
-Use the mock camera script against your deployed ingest endpoint:
+Preferred judge flow: open `/inject`, start the browser camera, and submit a live frame for AI classification.
+
+Legacy scripts are still available for local pipeline testing:
 
 ```powershell
 python scripts/mock_camera.py --ingest-url "https://ingest-incident-e5hgposbrq-uc.a.run.app"
@@ -87,10 +103,11 @@ python scripts/mock_edge_node.py --sensor=vitals --ingest-url "https://ingest-in
 ## Demo checklist
 
 1. Open admin view (`/`) and responder view (`/responder`) in separate sessions.
-2. Trigger incidents with `scripts/mock_camera.py`.
-3. Confirm assignment appears in responder view.
-4. Simulate offline in responder browser, accept task, then reconnect.
-5. Verify acknowledgment replay and final incident state in admin view.
+2. Open `/inject`, start the browser camera, and submit a live frame.
+3. If AI classification fails, resolve the incident from the SOC manual triage panel.
+4. Confirm assignment appears in responder view.
+5. Simulate offline in responder browser, accept task, then reconnect.
+6. Verify acknowledgment replay and final incident state in admin view.
 
 Email	Role	UID
 admin@orchid.local	admin	tDpDzgEVdzW1akTuEp0geVs5P1c2
