@@ -239,4 +239,4 @@ jobs:
           NEXT_PUBLIC_ACK_FUNCTION_URL: ${{ secrets.NEXT_PUBLIC_ACK_FUNCTION_URL }}
           NEXT_PUBLIC_GOOGLE_MAPS_API_KEY: ${{ secrets.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY }}
           NEXT_PUBLIC_INGEST_FUNCTION_URL: ${{ secrets.NEXT_PUBLIC_INGEST_FUNCTION_URL }}
-        run: npx firebase-tools@latest deploy --project "${PROJECT_ID}" --only hosting,firestore:rules --non-interactive
+        run: npx firebase-tools@latest deploy --project "${PROJECT_ID}" --only hosting,firestore:rules --non-interactive --force
