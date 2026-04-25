@@ -1,4 +1,7 @@
 {
+  "functions": {
+    "runtime": "nodejs22"
+  },
   "hosting": {
     "source": "dashboard",
     "frameworksBackend": {
