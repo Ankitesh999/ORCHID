@@ -197,7 +197,7 @@ jobs:
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
 
-      - name: Build dashboard export
+      - name: Build dashboard
         working-directory: dashboard
         env:
           NEXT_PUBLIC_FIREBASE_API_KEY: ${{ secrets.NEXT_PUBLIC_FIREBASE_API_KEY }}
@@ -212,6 +212,9 @@ jobs:
         run: |
           npm ci
           npm run build
+
+      - name: Enable Firebase web frameworks experiment
+        run: npx firebase-tools experiments:enable webframeworks
 
       - name: Deploy Firebase hosting and rules
         env:
