@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { collection, doc, limit, onSnapshot, query, setDoc, where } from "firebase/firestore";
+import { collection, doc, limit, onSnapshot, query, setDoc, updateDoc, where } from "firebase/firestore";
 import { User, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 
 import { auth, db } from "../lib/firebase";
@@ -23,6 +23,7 @@ type ResponderProfile = {
   };
   skills?: string[];
   availability?: boolean;
+  updatedAt?: string;
 };
 
 type HazardPin = {
@@ -111,15 +112,26 @@ function AckCountdownRing({ ackDeadline }: { ackDeadline?: string | null }) {
 function FieldTaskCard({
   incident,
   ackInFlight,
+  resolveInFlight,
+  distanceMeters,
+  currentLocation,
   onAck,
+  onResolve,
 }: {
   incident: Incident;
   ackInFlight: string | null;
+  resolveInFlight: string | null;
+  distanceMeters: number | null;
+  currentLocation: { lat: number; lng: number } | null;
   onAck: (id: string) => void;
+  onResolve: (incident: Incident) => void;
 }) {
   const severity = incident.severity?.enriched || incident.severity?.provisional || "medium";
   const classification = incident.classification?.enriched || incident.classification?.provisional || "Incident";
   const isAssigned = incident.status === "assigned";
+  const canResolve = ["assigned", "acknowledged"].includes(String(incident.status)) && distanceMeters !== null && distanceMeters <= 50 && !!currentLocation;
+  const etaMinutes = distanceMeters === null ? null : Math.max(1, Math.ceil(distanceMeters / 80));
+  const progress = distanceMeters === null ? 0 : Math.max(0, Math.min(100, 100 - (distanceMeters / 500) * 100));
 
   return (
     <article className="card responder-incident field-task-card">
@@ -139,7 +151,16 @@ function FieldTaskCard({
           <p><strong>Required skill</strong><span>{displayValue(incident.requiredSkill || "general")}</span></p>
           <p><strong>Ack deadline</strong><span>{formatTime(incident.ackDeadline)}</span></p>
           <p><strong>AI state</strong><span>{displayValue(incident.aiState || "completed")}</span></p>
+          <p><strong>Distance</strong><span>{distanceMeters === null ? "Waiting for GPS" : `${Math.round(distanceMeters)} m`}</span></p>
+          <p><strong>ETA</strong><span>{etaMinutes === null ? "-" : `${etaMinutes} min`}</span></p>
         </div>
+      </div>
+
+      <div className="eta-panel">
+        <div className="eta-track">
+          <span style={{ width: `${progress}%` }} />
+        </div>
+        <small>{distanceMeters !== null && distanceMeters <= 50 ? "Arrival geofence reached" : "Move within 50 m to resolve"}</small>
       </div>
 
       {incident.aiDetection?.evidenceSummary && (
@@ -174,7 +195,70 @@ function FieldTaskCard({
       >
         {ackInFlight === incident.id ? "Sending acceptance..." : isAssigned ? "Accept Assignment" : `Status: ${displayValue(incident.status)}`}
       </button>
+      <button
+        className="resolve-button"
+        onClick={() => onResolve(incident)}
+        disabled={!canResolve || resolveInFlight === incident.id}
+      >
+        {resolveInFlight === incident.id ? "Resolving..." : canResolve ? "Mark Resolved" : "Resolve Locked"}
+      </button>
     </article>
+  );
+}
+
+function IncidentReportForm({
+  incident,
+  user,
+  onError,
+}: {
+  incident: Incident;
+  user: User;
+  onError: (message: string | null) => void;
+}) {
+  const [situation, setSituation] = useState("");
+  const [actionsTaken, setActionsTaken] = useState("");
+  const [additionalResourcesNeeded, setAdditionalResourcesNeeded] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  async function submitReport(event: React.FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    onError(null);
+    try {
+      const now = new Date().toISOString();
+      await setDoc(doc(db, "incidents", incident.id, "reports", user.uid), {
+        responderId: user.uid,
+        situation,
+        actionsTaken,
+        additionalResourcesNeeded,
+        createdAt: now,
+        updatedAt: now,
+      }, { merge: true });
+      setSaved(true);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Report save failed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="card incident-report-card">
+      <div className="panel-heading">
+        <div>
+          <h2>Post-Arrival Report</h2>
+          <p>{incident.id}</p>
+        </div>
+        {saved && <span className="admin-status admin-status-online">Saved</span>}
+      </div>
+      <form onSubmit={submitReport}>
+        <label>Actual situation <textarea value={situation} onChange={(event) => setSituation(event.target.value)} required /></label>
+        <label>Actions taken <textarea value={actionsTaken} onChange={(event) => setActionsTaken(event.target.value)} required /></label>
+        <label>Additional resources needed <textarea value={additionalResourcesNeeded} onChange={(event) => setAdditionalResourcesNeeded(event.target.value)} /></label>
+        <button type="submit" disabled={saving}>{saving ? "Saving..." : "Submit Report"}</button>
+      </form>
+    </section>
   );
 }
 
@@ -189,12 +273,16 @@ export function ResponderShell() {
   const [ackInFlight, setAckInFlight] = useState<string | null>(null);
   const [isOnline, setIsOnline] = useState<boolean>(typeof navigator === "undefined" ? true : navigator.onLine);
   const [pendingCount, setPendingCount] = useState(0);
+  const [currentLocation, setCurrentLocation] = useState<{ lat: number; lng: number } | null>(null);
+  const [geoError, setGeoError] = useState<string | null>(null);
+  const [resolveInFlight, setResolveInFlight] = useState<string | null>(null);
   const [hazards, setHazards] = useState<HazardPin[]>([]);
   const [crisisActive, setCrisisActive] = useState(false);
   const [crisisLabel, setCrisisLabel] = useState("");
   const biddedIncidents = useRef<Set<string>>(new Set());
   const seenAssignedRef = useRef<Set<string>>(new Set());
   const crisisTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastPresenceWriteRef = useRef(0);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (next) => {
@@ -228,6 +316,7 @@ export function ResponderShell() {
         lastKnownLocation: data.lastKnownLocation,
         skills: data.skills,
         availability: data.availability,
+        updatedAt: data.updatedAt,
       });
     });
 
@@ -259,6 +348,37 @@ export function ResponderShell() {
       unsubProfile();
       unsubIncidents();
     };
+  }, [user]);
+
+  useEffect(() => {
+    if (!user || typeof navigator === "undefined" || !navigator.geolocation) {
+      if (user) setGeoError("Geolocation is not available on this device.");
+      return;
+    }
+
+    const watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        const next = {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+        };
+        setCurrentLocation(next);
+        setGeoError(null);
+
+        const now = Date.now();
+        if (now - lastPresenceWriteRef.current < 5000) return;
+        lastPresenceWriteRef.current = now;
+        setDoc(doc(db, "users", user.uid), {
+          lastKnownLocation: next,
+          availability: true,
+          updatedAt: new Date(now).toISOString(),
+        }, { merge: true }).catch((err) => setGeoError(err.message));
+      },
+      (err) => setGeoError(err.message),
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
+    );
+
+    return () => navigator.geolocation.clearWatch(watchId);
   }, [user]);
 
   useEffect(() => {
@@ -332,9 +452,17 @@ export function ResponderShell() {
   }, []);
 
   const activeIncident = useMemo(
-    () => incidents.find((item) => item.status === "assigned") || incidents[0] || null,
+    () => incidents.find((item) => item.status === "assigned") || incidents.find((item) => item.status === "acknowledged") || incidents[0] || null,
     [incidents]
   );
+
+  const activeDistanceMeters = useMemo(() => {
+    if (!activeIncident?.location || !currentLocation) return null;
+    const lat2 = Number(activeIncident.location.lat);
+    const lng2 = Number(activeIncident.location.lng);
+    if (!Number.isFinite(lat2) || !Number.isFinite(lng2)) return null;
+    return haversineMeters(currentLocation.lat, currentLocation.lng, lat2, lng2);
+  }, [activeIncident, currentLocation]);
 
   async function onSignIn(event: React.FormEvent) {
     event.preventDefault();
@@ -380,6 +508,29 @@ export function ResponderShell() {
     }
   }
 
+  async function resolveIncident(incident: Incident) {
+    if (!user || !currentLocation || activeDistanceMeters === null) return;
+    setResolveInFlight(incident.id);
+    setError(null);
+    try {
+      const now = new Date().toISOString();
+      await updateDoc(doc(db, "incidents", incident.id), {
+        status: "resolved",
+        resolvedAt: now,
+        resolvedBy: user.uid,
+        resolution: {
+          distanceMeters: Math.round(activeDistanceMeters),
+          location: currentLocation,
+        },
+        updatedAt: now,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Resolution failed.");
+    } finally {
+      setResolveInFlight(null);
+    }
+  }
+
   if (loading) {
     return (
       <main className="responder-shell">
@@ -408,10 +559,11 @@ export function ResponderShell() {
     );
   }
 
-  const origin =
+  const origin = currentLocation || (
     profile?.lastKnownLocation?.lat !== undefined && profile?.lastKnownLocation?.lng !== undefined
       ? { lat: Number(profile.lastKnownLocation.lat), lng: Number(profile.lastKnownLocation.lng) }
-      : null;
+      : null
+  );
 
   const destination =
     activeIncident?.location?.lat !== undefined && activeIncident?.location?.lng !== undefined
@@ -453,13 +605,25 @@ export function ResponderShell() {
         </div>
         <div className="responder-status-pill rsp-neutral">{incidents.length} tasks</div>
         <div className={`responder-status-pill ${pendingCount > 0 ? "rsp-warning" : "rsp-neutral"}`}>{pendingCount} queued</div>
-        <div className="responder-status-pill rsp-neutral">{origin ? `${origin.lat.toFixed(4)}, ${origin.lng.toFixed(4)}` : "No GPS"}</div>
+        <div className="responder-status-pill rsp-neutral">{currentLocation ? `${currentLocation.lat.toFixed(4)}, ${currentLocation.lng.toFixed(4)}` : origin ? `${origin.lat.toFixed(4)}, ${origin.lng.toFixed(4)}` : "No GPS"}</div>
       </section>
 
       {error && <p className="error inline">{error}</p>}
+      {geoError && <p className="error inline">{geoError}</p>}
 
       {activeIncident ? (
-        <FieldTaskCard incident={activeIncident} ackInFlight={ackInFlight} onAck={acknowledge} />
+        <>
+          <FieldTaskCard
+            incident={activeIncident}
+            ackInFlight={ackInFlight}
+            resolveInFlight={resolveInFlight}
+            distanceMeters={activeDistanceMeters}
+            currentLocation={currentLocation}
+            onAck={acknowledge}
+            onResolve={resolveIncident}
+          />
+          {activeIncident.status === "resolved" && <IncidentReportForm incident={activeIncident} user={user} onError={setError} />}
+        </>
       ) : (
         <article className="card responder-incident">
           <div className="responder-standby">

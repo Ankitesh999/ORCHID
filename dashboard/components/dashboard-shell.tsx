@@ -13,6 +13,8 @@ type ResponderPin = {
   id: string;
   displayName?: string;
   availability?: boolean;
+  disabled?: boolean;
+  updatedAt?: string;
   lastKnownLocation?: {
     lat?: number;
     lng?: number;
@@ -68,6 +70,16 @@ function displayValue(value?: string | null) {
 
 function statusLabel(status?: string) {
   return displayValue(status || "unknown").toUpperCase();
+}
+
+function lastSeenLabel(value?: string) {
+  if (!value) return "No GPS update";
+  const ts = Date.parse(value);
+  if (Number.isNaN(ts)) return value;
+  const seconds = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  return `${minutes}m ago`;
 }
 
 function defaultTriageDraft(incident?: Incident | null): TriageDraft {
@@ -285,7 +297,15 @@ function AssignmentPanel({
   );
 }
 
-function TacticalMap({ incidents, responders }: { incidents: Incident[]; responders: ResponderPin[] }) {
+function TacticalMap({
+  incidents,
+  responders,
+  simPositions
+}: {
+  incidents: Incident[];
+  responders: ResponderPin[];
+  simPositions: Record<string, { lat: number; lng: number }>;
+}) {
   return (
     <section className="card soc-panel map-panel" aria-label="Tactical map">
       <div className="panel-heading">
@@ -299,35 +319,87 @@ function TacticalMap({ incidents, responders }: { incidents: Incident[]; respond
         <span className="sim-zone-label" style={{ left: "52%", top: "15%" }}>EAST WING</span>
         <span className="sim-zone-label" style={{ left: "12%", top: "62%" }}>CORRIDOR A</span>
         <span className="sim-zone-label" style={{ left: "62%", top: "62%" }}>EXIT BLOCK</span>
+        <span className="sim-zone-label" style={{ left: "40%", top: "85%", fontSize: '12px', opacity: 0.15 }}>PARKING NORTH</span>
+        <span className="sim-zone-label" style={{ left: "80%", top: "35%", fontSize: '12px', opacity: 0.15 }}>SERVER ROOM</span>
 
         {incidents
-          .filter((incident) => incident.location?.lat && incident.location?.lng && ACTIVE_STATUSES.has(String(incident.status)))
+          .filter((incident) => ACTIVE_STATUSES.has(String(incident.status)))
           .map((incident) => {
-            const point = locationToPercent(incident.location);
+            const severity = incident.severity?.enriched || incident.severity?.provisional || "medium";
+            const pos = incident.location?.lat ? incident.location : simPositions[`INC-${incident.id}`];
+            if (!pos) return null;
+            const point = locationToPercent(pos);
             return (
               <div
                 key={`incident-${incident.id}`}
-                className={`map-incident-pin ${incident.status === "triage_required" ? "map-incident-triage" : ""}`}
+                className={`map-incident-pin map-incident-pin-${severity} ${incident.status === "triage_required" ? "map-incident-triage" : ""}`}
                 style={{ left: `${point.x}%`, top: `${point.y}%` }}
-                title={incident.id}
+                title={`${incident.id} (${severity})`}
               />
             );
           })}
 
-        {responders.map((responder) => {
-          const point = locationToPercent(responder.lastKnownLocation);
-          const assigned = incidents.some((incident) => incident.assignedResponderId === responder.id && incident.status === "assigned");
+        {responders.filter((responder) => !responder.disabled).map((responder) => {
+          const simPos = simPositions[responder.id];
+          const point = locationToPercent(simPos || responder.lastKnownLocation);
+          const assigned = incidents.some((incident) => incident.assignedResponderId === responder.id && ["assigned", "acknowledged"].includes(String(incident.status)));
+          const freshGps = responder.updatedAt ? Date.now() - Date.parse(responder.updatedAt) < 30000 : false;
           return (
             <div
               key={responder.id}
-              className={`map-responder-pin ${responder.availability === false ? "map-pin-offline" : ""} ${assigned ? "map-pin-assigned" : ""}`}
-              style={{ left: `${point.x}%`, top: `${point.y}%` }}
-              title={responder.displayName || responder.id}
+              className={`map-responder-pin ${responder.availability === false ? "map-pin-offline" : ""} ${assigned ? "map-pin-assigned" : ""} ${freshGps ? "map-pin-live" : ""}`}
+              style={{ left: `${point.x}%`, top: `${point.y}%`, transition: 'all 0.5s linear' }}
+              title={`${responder.displayName || responder.id} - last seen ${lastSeenLabel(responder.updatedAt)}`}
             >
               {(responder.displayName || responder.id).slice(0, 2).toUpperCase()}
             </div>
           );
         })}
+      </div>
+    </section>
+  );
+}
+
+function ActivityTimeline({ incidents, responders }: { incidents: Incident[]; responders: ResponderPin[] }) {
+  const events = useMemo(() => {
+    const rows: Array<{ id: string; ts: string; label: string; tone: string }> = [];
+    incidents.forEach((incident) => {
+      const name = displayValue(incident.classification?.enriched || incident.classification?.provisional || "incident");
+      if (incident.createdAt) rows.push({ id: `${incident.id}-created`, ts: incident.createdAt, label: `${incident.id} detected as ${name}`, tone: "info" });
+      if (incident.allocation?.assignedAt && incident.assignedResponderId) rows.push({ id: `${incident.id}-assigned`, ts: incident.allocation.assignedAt, label: `${incident.assignedResponderId} assigned to ${incident.id}`, tone: "warn" });
+      if (incident.acknowledgedAt) rows.push({ id: `${incident.id}-ack`, ts: incident.acknowledgedAt, label: `${incident.id} acknowledged`, tone: "ok" });
+      if (incident.resolvedAt) rows.push({ id: `${incident.id}-resolved`, ts: incident.resolvedAt, label: `${incident.id} resolved by ${incident.resolvedBy || "responder"}`, tone: "ok" });
+    });
+    responders.forEach((responder) => {
+      if (responder.updatedAt) rows.push({ id: `${responder.id}-gps`, ts: responder.updatedAt, label: `${responder.displayName || responder.id} GPS update`, tone: responder.availability === false ? "muted" : "info" });
+    });
+    return rows
+      .filter((row) => !Number.isNaN(Date.parse(row.ts)))
+      .sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts))
+      .slice(0, 12);
+  }, [incidents, responders]);
+
+  return (
+    <section className="card soc-panel activity-panel">
+      <div className="panel-heading">
+        <div>
+          <h2>Activity Timeline</h2>
+          <p>Incident and responder events</p>
+        </div>
+        <span className="panel-count">{events.length}</span>
+      </div>
+      <div className="activity-list">
+        {events.length === 0 ? (
+          <p className="empty-state">No activity yet.</p>
+        ) : events.map((event) => (
+          <div key={event.id} className={`activity-row activity-${event.tone}`}>
+            <span className="activity-dot" />
+            <div>
+              <strong>{event.label}</strong>
+              <small>{formatTime(event.ts)}</small>
+            </div>
+          </div>
+        ))}
       </div>
     </section>
   );
@@ -346,6 +418,56 @@ export function DashboardShell() {
   const [crisisLabel, setCrisisLabel] = useState("");
   const seenIdsRef = useRef<Set<string>>(new Set());
   const crisisTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Simulation State
+  const [simPositions, setSimPositions] = useState<Record<string, { lat: number; lng: number }>>({});
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setSimPositions(prev => {
+        const next = { ...prev };
+
+        responders.filter((r) => !r.disabled).forEach(r => {
+          // Initialize if missing
+          if (!next[r.id]) {
+            next[r.id] = r.lastKnownLocation?.lat ? { lat: r.lastKnownLocation.lat, lng: r.lastKnownLocation.lng! } : {
+              lat: CAMPUS_BOUNDS.south + Math.random() * (CAMPUS_BOUNDS.north - CAMPUS_BOUNDS.south),
+              lng: CAMPUS_BOUNDS.west + Math.random() * (CAMPUS_BOUNDS.east - CAMPUS_BOUNDS.west)
+            };
+          }
+
+          // Check for active assignment
+          const activeIncident = incidents.find(inc => inc.assignedResponderId === r.id && inc.status === "assigned");
+
+          if (activeIncident && activeIncident.location?.lat && activeIncident.location?.lng) {
+            // Move towards incident
+            const target = activeIncident.location;
+            const speed = 0.00018;
+            const dLat = target.lat! - next[r.id].lat;
+            const dLng = target.lng! - next[r.id].lng;
+            const dist = Math.sqrt(dLat * dLat + dLng * dLng);
+
+            if (dist > speed) {
+              next[r.id] = {
+                lat: next[r.id].lat + (dLat / dist) * speed,
+                lng: next[r.id].lng + (dLng / dist) * speed
+              };
+            }
+          } else {
+            // Idle random walk
+            const jitter = 0.00005;
+            next[r.id] = {
+              lat: Math.min(CAMPUS_BOUNDS.north, Math.max(CAMPUS_BOUNDS.south, next[r.id].lat + (Math.random() - 0.5) * jitter)),
+              lng: Math.min(CAMPUS_BOUNDS.east, Math.max(CAMPUS_BOUNDS.west, next[r.id].lng + (Math.random() - 0.5) * jitter))
+            };
+          }
+        });
+
+        return next;
+      });
+    }, 500);
+
+    return () => clearInterval(interval);
+  }, [incidents, responders]);
 
   const triggerCrisisAlert = useCallback((label: string) => {
     setCrisisActive(true);
@@ -400,6 +522,25 @@ export function DashboardShell() {
     };
   }, [user]);
 
+  // Patch missing incident locations randomly for demo
+  useEffect(() => {
+    setSimPositions(prev => {
+      const next = { ...prev };
+      let changed = false;
+      incidents.forEach(inc => {
+        const key = `INC-${inc.id}`;
+        if (!inc.location?.lat && !next[key]) {
+          next[key] = {
+            lat: CAMPUS_BOUNDS.south + Math.random() * (CAMPUS_BOUNDS.north - CAMPUS_BOUNDS.south),
+            lng: CAMPUS_BOUNDS.west + Math.random() * (CAMPUS_BOUNDS.east - CAMPUS_BOUNDS.west)
+          };
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [incidents]);
+
   const counts = useMemo(() => {
     return {
       triage: incidents.filter((item) => item.status === "triage_required").length,
@@ -407,6 +548,7 @@ export function DashboardShell() {
       assigned: incidents.filter((item) => item.status === "assigned").length,
       acknowledged: incidents.filter((item) => item.status === "acknowledged").length,
       escalated: incidents.filter((item) => item.status === "unacked_escalation").length,
+      resolved: incidents.filter((item) => item.status === "resolved").length,
     };
   }, [incidents]);
 
@@ -468,7 +610,8 @@ export function DashboardShell() {
           <p>Live incident coordination, AI provenance, and responder dispatch.</p>
         </div>
         <div className="topbar-actions">
-          <a href="/inject" className="inject-pill-link">Live Intake</a>
+          <a href="/admin/responders" className="inject-nav-link">Responders</a>
+          <a href="/inject" className="inject-nav-link">Live Intake</a>
           <span>{user.email}</span>
           <button onClick={() => signOut(auth)}>Sign Out</button>
         </div>
@@ -480,6 +623,7 @@ export function DashboardShell() {
         <article className="card stat-assigned"><h2>Assigned</h2><p>{counts.assigned}</p></article>
         <article className="card stat-acked"><h2>Acknowledged</h2><p>{counts.acknowledged}</p></article>
         <article className={`card ${counts.escalated > 0 ? "stat-escalated" : ""}`}><h2>Escalated</h2><p>{counts.escalated}</p></article>
+        <article className="card stat-resolved"><h2>Resolved</h2><p>{counts.resolved}</p></article>
       </section>
 
       <PerceptionTier />
@@ -524,7 +668,7 @@ export function DashboardShell() {
         </div>
 
         <aside className="soc-side-column">
-          <TacticalMap incidents={incidents} responders={responders} />
+          <TacticalMap incidents={incidents} responders={responders} simPositions={simPositions} />
           <section className="card soc-panel">
             <div className="panel-heading">
               <div>
@@ -533,18 +677,19 @@ export function DashboardShell() {
               </div>
             </div>
             <div className="responder-list">
-              {responders.map((responder) => (
+              {responders.length === 0 ? <p className="empty-state">No Firestore responders registered.</p> : responders.map((responder) => (
                 <div key={responder.id} className="responder-row">
-                  <span className={`rsp-dot ${responder.availability === false ? "offline" : ""}`} />
+                  <span className={`rsp-dot ${responder.availability === false || responder.disabled ? "offline" : ""}`} />
                   <div>
                     <strong>{responder.displayName || responder.id}</strong>
-                    <small>{(responder.skills || ["general"]).map(displayValue).join(", ")}</small>
+                    <small>{(responder.skills || ["general"]).map(displayValue).join(", ")} - {lastSeenLabel(responder.updatedAt)}</small>
                   </div>
-                  <em>{responder.availability === false ? "Unavailable" : "Available"}</em>
+                  <em>{responder.disabled ? "Disabled" : responder.availability === false ? "Unavailable" : "Available"}</em>
                 </div>
               ))}
             </div>
           </section>
+          <ActivityTimeline incidents={incidents} responders={responders} />
         </aside>
       </div>
     </main>

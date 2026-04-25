@@ -35,6 +35,43 @@ service cloud.firestore {
         && request.resource.data.distance is number;
     }
 
+    function responderResolveUpdate() {
+      return signedIn()
+        && role() == "responder"
+        && resource.data.assignedResponderId == request.auth.uid
+        && resource.data.status in ["assigned", "acknowledged"]
+        && request.resource.data.status == "resolved"
+        && request.resource.data.resolvedBy == request.auth.uid
+        && request.resource.data.resolvedAt is string
+        && request.resource.data.updatedAt is string
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "status",
+          "resolvedAt",
+          "resolvedBy",
+          "resolution",
+          "updatedAt"
+        ]);
+    }
+
+    function responderReportWrite(reportId) {
+      return signedIn()
+        && role() == "responder"
+        && request.auth.uid == reportId
+        && request.resource.data.responderId == request.auth.uid
+        && request.resource.data.keys().hasOnly([
+          "responderId",
+          "situation",
+          "actionsTaken",
+          "additionalResourcesNeeded",
+          "createdAt",
+          "updatedAt"
+        ])
+        && request.resource.data.situation is string
+        && request.resource.data.actionsTaken is string
+        && request.resource.data.createdAt is string
+        && request.resource.data.updatedAt is string;
+    }
+
     match /users/{uid} {
       allow read: if signedIn() && (role() == "admin" || request.auth.uid == uid);
       allow create, delete: if signedIn() && role() == "admin";
@@ -43,11 +80,18 @@ service cloud.firestore {
 
     match /incidents/{incidentId} {
       allow read: if signedIn() && (role() == "admin" || role() == "responder");
-      allow create, update, delete: if signedIn() && role() == "admin";
+      allow create, delete: if signedIn() && role() == "admin";
+      allow update: if signedIn() && (role() == "admin" || responderResolveUpdate());
 
       match /bids/{bidId} {
         allow read: if signedIn() && (role() == "admin" || role() == "responder");
         allow create, update: if responderBidWrite(bidId);
+      }
+
+      match /reports/{reportId} {
+        allow read: if signedIn() && (role() == "admin" || request.auth.uid == reportId);
+        allow create, update: if responderReportWrite(reportId);
+        allow delete: if signedIn() && role() == "admin";
       }
     }
 

@@ -46,6 +46,9 @@ class IngestPayload:
     image_base64: str | None
     image_mime_type: str | None
     location: dict[str, float] | None
+    source_type: str = "camera_capture"
+    volume: float | None = None
+    confidence: float | None = None
 
 
 @dataclass(frozen=True)

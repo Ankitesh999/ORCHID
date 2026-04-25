@@ -37,6 +37,15 @@ export type Incident = {
   assignmentAttempt?: number;
   ackDeadline?: string | null;
   acknowledgedAt?: string | null;
+  resolvedAt?: string | null;
+  resolvedBy?: string | null;
+  resolution?: {
+    distanceMeters?: number;
+    location?: {
+      lat?: number;
+      lng?: number;
+    };
+  };
   retryEligibleAt?: string | null;
   aiDetection?: {
     label?: string;
