@@ -567,11 +567,7 @@ export function ResponderShell() {
     );
   }
 
-  const origin = currentLocation || (
-    profile?.lastKnownLocation?.lat !== undefined && profile?.lastKnownLocation?.lng !== undefined
-      ? { lat: Number(profile.lastKnownLocation.lat), lng: Number(profile.lastKnownLocation.lng) }
-      : null
-  );
+  const origin = effectiveLocation;
 
   const destination =
     activeIncident?.location?.lat !== undefined && activeIncident?.location?.lng !== undefined
