@@ -40,8 +40,11 @@ const MOTION_PIXEL_RATIO = 0.02; // 2% of pixels must change
 const DETECTION_FPS = 2;
 const AUTO_COOLDOWN_MS = 8000; // min time between auto-captures
 const MIC_SAMPLE_MS = 100;
-const MIC_ANOMALY_THRESHOLD = 78;
-const MIC_AUTO_COOLDOWN_MS = 15000;
+const MIC_ANOMALY_THRESHOLD = 62;
+const MIC_TRANSIENT_PEAK_THRESHOLD = 88;
+const MIC_DYNAMIC_SIGMA = 2.2;
+const MIC_MIN_DELTA = 10;
+const MIC_AUTO_COOLDOWN_MS = 7000;
 
 function makeId() {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -96,6 +99,9 @@ export function CrisisInjectionShell() {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const micIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastMicIncidentRef = useRef(0);
+  const micBaselineRef = useRef(30);
+  const micVarianceRef = useRef(100);
+  const micWarmupSamplesRef = useRef(0);
 
   // Keep autoDetect ref in sync
   useEffect(() => {
@@ -190,7 +196,15 @@ export function CrisisInjectionShell() {
   async function startMicrophone() {
     setMicError(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: 1,
+        },
+        video: false,
+      });
       micStreamRef.current?.getTracks().forEach((track) => track.stop());
       micStreamRef.current = stream;
 
@@ -201,12 +215,17 @@ export function CrisisInjectionShell() {
       const audioContext = new AudioContextCtor();
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 256;
-      analyser.smoothingTimeConstant = 0.72;
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.55;
+      analyser.minDecibels = -100;
+      analyser.maxDecibels = -10;
       source.connect(analyser);
 
       audioContextRef.current = audioContext;
       analyserRef.current = analyser;
+      micBaselineRef.current = 30;
+      micVarianceRef.current = 100;
+      micWarmupSamplesRef.current = 0;
       setMicActive(true);
       appendLog("success", "Microphone stream ready. Acoustic anomaly detection active.");
       micChannelRef.current?.postMessage({ type: "mic_status", active: true, micId: "MIC-01" } satisfies MicStatusMessage);
@@ -240,13 +259,71 @@ export function CrisisInjectionShell() {
     const analyser = analyserRef.current;
     if (!analyser) return;
     const bins = new Uint8Array(analyser.frequencyBinCount);
+    const timeBins = new Uint8Array(analyser.fftSize);
     analyser.getByteFrequencyData(bins);
+    analyser.getByteTimeDomainData(timeBins);
     const frequencyData = Array.from(bins);
-    const rms = Math.sqrt(frequencyData.reduce((sum, value) => sum + value * value, 0) / Math.max(1, frequencyData.length));
-    const volume = Math.min(100, Math.round((rms / 255) * 140));
-    const anomaly = volume >= MIC_ANOMALY_THRESHOLD;
+    const freqRms = Math.sqrt(frequencyData.reduce((sum, value) => sum + value * value, 0) / Math.max(1, frequencyData.length));
+    const timeRmsNorm = Math.sqrt(timeBins.reduce((sum, value) => {
+      const centered = (value - 128) / 128;
+      return sum + centered * centered;
+    }, 0) / Math.max(1, timeBins.length));
+    const peakNorm = timeBins.reduce((max, value) => {
+      const centered = Math.abs((value - 128) / 128);
+      return Math.max(max, centered);
+    }, 0);
+
+    const lowBand = frequencyData.slice(0, Math.max(1, Math.floor(frequencyData.length * 0.25)));
+    const highBand = frequencyData.slice(Math.floor(frequencyData.length * 0.45));
+    const lowAvg = lowBand.reduce((sum, value) => sum + value, 0) / Math.max(1, lowBand.length);
+    const highAvg = highBand.reduce((sum, value) => sum + value, 0) / Math.max(1, highBand.length);
+    const spectralSkew = highAvg - lowAvg;
+
+    const composite = (freqRms * 0.62) + (timeRmsNorm * 255 * 0.38);
+    const volume = Math.min(100, Math.round((composite / 255) * 140));
+    const peak = Math.min(100, Math.round(peakNorm * 100));
     const now = Date.now();
-    const confidence = Math.min(99, Math.max(55, Math.round(volume * 1.05)));
+    const baseline = micBaselineRef.current;
+    const variance = Math.max(1, micVarianceRef.current);
+    const sigma = Math.sqrt(variance);
+    const delta = volume - baseline;
+    const dynamicThreshold = Math.max(MIC_MIN_DELTA, MIC_DYNAMIC_SIGMA * sigma);
+
+    const warmup = micWarmupSamplesRef.current < 12;
+    if (warmup) {
+      micWarmupSamplesRef.current += 1;
+      micBaselineRef.current = (micBaselineRef.current * 0.8) + (volume * 0.2);
+      const diff = volume - micBaselineRef.current;
+      micVarianceRef.current = (micVarianceRef.current * 0.8) + (diff * diff * 0.2);
+    }
+
+    const anomaly =
+      !warmup &&
+      (
+        volume >= MIC_ANOMALY_THRESHOLD ||
+        peak >= MIC_TRANSIENT_PEAK_THRESHOLD ||
+        (delta >= dynamicThreshold) ||
+        (delta >= MIC_MIN_DELTA - 2 && spectralSkew > 14)
+      );
+
+    if (!anomaly) {
+      micBaselineRef.current = (micBaselineRef.current * 0.92) + (volume * 0.08);
+      const diff = volume - micBaselineRef.current;
+      micVarianceRef.current = (micVarianceRef.current * 0.9) + (diff * diff * 0.1);
+    }
+
+    const confidence = Math.min(
+      99,
+      Math.max(
+        55,
+        Math.round(
+          (volume * 0.55) +
+          (peak * 0.25) +
+          (Math.max(0, delta) * 1.2) +
+          (Math.max(0, spectralSkew) * 0.4)
+        )
+      )
+    );
 
     setMicFrequencyData(frequencyData);
     setMicVolume(volume);
@@ -273,7 +350,7 @@ export function CrisisInjectionShell() {
 
     if (anomaly && INGEST_URL && now - lastMicIncidentRef.current > MIC_AUTO_COOLDOWN_MS) {
       lastMicIncidentRef.current = now;
-      appendLog("detect", `MIC AUTO-DETECT: volume ${volume} - submitting acoustic incident...`);
+      appendLog("detect", `MIC AUTO-DETECT: volume ${volume} peak ${peak} delta ${Math.round(delta)} - submitting acoustic incident...`);
       void autoFireMicIncident(volume, confidence);
     }
   }

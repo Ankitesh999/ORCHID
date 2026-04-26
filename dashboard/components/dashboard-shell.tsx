@@ -331,12 +331,20 @@ function TacticalMap({
   const incidentMarkersRef = useRef<Record<string, any>>({});
   const responderMarkersRef = useRef<Record<string, any>>({});
   const hasInitialFitRef = useRef(false);
+  const [incidentPulseOn, setIncidentPulseOn] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const activeIncidents = useMemo(() => {
     const nowMs = Date.now();
     return incidents.filter((incident) => isRecentOperationalIncident(incident, nowMs));
   }, [incidents]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setIncidentPulseOn((current) => !current);
+    }, 700);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!apiKey || !mapRef.current) {
@@ -392,7 +400,6 @@ function TacticalMap({
       if (incident.location?.lat === undefined || incident.location?.lng === undefined) return;
       const point = normalizeToDemoCampus(incident.location);
       const severity = String(incident.severity?.enriched || incident.severity?.provisional || "medium").toLowerCase();
-      const color = "#ef4444";
 
       let marker = incidentMarkersRef.current[incident.id];
       if (!marker) {
@@ -403,13 +410,13 @@ function TacticalMap({
       marker.setTitle(`${incident.id} (${severity})`);
       marker.setIcon({
         path: maps.SymbolPath.CIRCLE,
-        scale: severity === "critical" ? 10 : 8,
-        fillColor: color,
-        fillOpacity: 1,
-        strokeColor: "#ffffff",
+        scale: incidentPulseOn ? (severity === "critical" ? 11 : 9) : (severity === "critical" ? 8.5 : 7),
+        fillColor: "#ef4444",
+        fillOpacity: incidentPulseOn ? 1 : 0.45,
+        strokeColor: "#7f1d1d",
         strokeWeight: 2,
       });
-      marker.setAnimation(maps.Animation.BOUNCE);
+      marker.setAnimation(null);
       marker.setMap(map);
 
       nextIncidentIds.add(incident.id);
@@ -472,7 +479,7 @@ function TacticalMap({
       else map.setCenter(DEMO_CENTER);
       hasInitialFitRef.current = true;
     }
-  }, [activeIncidents, responders, simPositions]);
+  }, [activeIncidents, responders, simPositions, incidentPulseOn]);
 
   return (
     <section className="card soc-panel map-panel" aria-label="Tactical map">
@@ -570,6 +577,7 @@ export function DashboardShell() {
           const activeIncident = incidents.find((inc) =>
             inc.assignedResponderId === r.id &&
             String(inc.status) === "acknowledged" &&
+            !!inc.acknowledgedAt &&
             inc.location?.lat !== undefined &&
             inc.location?.lng !== undefined
           );
