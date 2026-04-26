@@ -114,7 +114,7 @@ function FieldTaskCard({
   ackInFlight,
   resolveInFlight,
   distanceMeters,
-  currentLocation,
+  effectiveLocation,
   onAck,
   onResolve,
 }: {
@@ -122,14 +122,14 @@ function FieldTaskCard({
   ackInFlight: string | null;
   resolveInFlight: string | null;
   distanceMeters: number | null;
-  currentLocation: { lat: number; lng: number } | null;
+  effectiveLocation: { lat: number; lng: number } | null;
   onAck: (id: string) => void;
   onResolve: (incident: Incident) => void;
 }) {
   const severity = incident.severity?.enriched || incident.severity?.provisional || "medium";
   const classification = incident.classification?.enriched || incident.classification?.provisional || "Incident";
   const isAssigned = incident.status === "assigned";
-  const canResolve = ["assigned", "acknowledged"].includes(String(incident.status)) && distanceMeters !== null && distanceMeters <= 50 && !!currentLocation;
+  const canResolve = ["assigned", "acknowledged"].includes(String(incident.status)) && distanceMeters !== null && distanceMeters <= 50 && !!effectiveLocation;
   const etaMinutes = distanceMeters === null ? null : Math.max(1, Math.ceil(distanceMeters / 80));
   const progress = distanceMeters === null ? 0 : Math.max(0, Math.min(100, 100 - (distanceMeters / 500) * 100));
 
@@ -456,13 +456,21 @@ export function ResponderShell() {
     [incidents]
   );
 
+  const effectiveLocation = useMemo(() => {
+    if (currentLocation) return currentLocation;
+    const lat = Number(profile?.lastKnownLocation?.lat);
+    const lng = Number(profile?.lastKnownLocation?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat, lng };
+  }, [currentLocation, profile?.lastKnownLocation?.lat, profile?.lastKnownLocation?.lng]);
+
   const activeDistanceMeters = useMemo(() => {
-    if (!activeIncident?.location || !currentLocation) return null;
+    if (!activeIncident?.location || !effectiveLocation) return null;
     const lat2 = Number(activeIncident.location.lat);
     const lng2 = Number(activeIncident.location.lng);
     if (!Number.isFinite(lat2) || !Number.isFinite(lng2)) return null;
-    return haversineMeters(currentLocation.lat, currentLocation.lng, lat2, lng2);
-  }, [activeIncident, currentLocation]);
+    return haversineMeters(effectiveLocation.lat, effectiveLocation.lng, lat2, lng2);
+  }, [activeIncident, effectiveLocation]);
 
   async function onSignIn(event: React.FormEvent) {
     event.preventDefault();
@@ -509,7 +517,7 @@ export function ResponderShell() {
   }
 
   async function resolveIncident(incident: Incident) {
-    if (!user || !currentLocation || activeDistanceMeters === null) return;
+    if (!user || !effectiveLocation || activeDistanceMeters === null) return;
     setResolveInFlight(incident.id);
     setError(null);
     try {
@@ -520,7 +528,7 @@ export function ResponderShell() {
         resolvedBy: user.uid,
         resolution: {
           distanceMeters: Math.round(activeDistanceMeters),
-          location: currentLocation,
+          location: effectiveLocation,
         },
         updatedAt: now,
       });
@@ -618,7 +626,7 @@ export function ResponderShell() {
             ackInFlight={ackInFlight}
             resolveInFlight={resolveInFlight}
             distanceMeters={activeDistanceMeters}
-            currentLocation={currentLocation}
+            effectiveLocation={effectiveLocation}
             onAck={acknowledge}
             onResolve={resolveIncident}
           />

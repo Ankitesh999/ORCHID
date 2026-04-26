@@ -467,6 +467,21 @@ select:focus {
 
 .soc-map-board {
   height: 480px;
+  touch-action: none;
+}
+
+.soc-map-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.soc-map-content {
+  position: absolute;
+  inset: 0;
+  transform-origin: center center;
+  will-change: transform;
 }
 
 .map-incident-pin,
@@ -1091,7 +1106,7 @@ textarea:focus {
 .admin-table-head,
 .admin-table-row {
   display: grid;
-  grid-template-columns: minmax(160px, 1.3fr) minmax(160px, 1.2fr) 135px 95px 150px;
+  grid-template-columns: minmax(160px, 1.3fr) minmax(160px, 1.2fr) 135px 95px 220px;
   gap: 10px;
   align-items: center;
 }
