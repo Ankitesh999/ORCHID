@@ -68,7 +68,7 @@ function FallbackMap({ origin, destination, indoorNote }: { origin: Coordinates 
 export function RouteMap({ origin, destination, hazards, className, indoorNote }: RouteMapProps) {
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
   const mapRef = useRef<HTMLDivElement | null>(null);
-  const markersRef = useRef<any[]>([]);
+  const overlaysRef = useRef<any[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [useFallback, setUseFallback] = useState(false);
 
@@ -111,13 +111,41 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
         const directionsService = new googleMaps.DirectionsService();
         const directionsRenderer = new googleMaps.DirectionsRenderer({
           map,
-          suppressMarkers: false,
+          suppressMarkers: true,
           polylineOptions: {
             strokeColor: "#38bdf8",
             strokeWeight: 5,
             strokeOpacity: 0.9,
           },
         });
+        overlaysRef.current.push(directionsRenderer);
+
+        const bounds = new googleMaps.LatLngBounds();
+        bounds.extend(origin);
+        bounds.extend(destination);
+        map.fitBounds(bounds);
+
+        const responderMarker = new googleMaps.Marker({
+          map,
+          position: origin,
+          title: "Responder location",
+          label: {
+            text: "R",
+            color: "#ffffff",
+            fontWeight: "700",
+          },
+        });
+        const incidentMarker = new googleMaps.Marker({
+          map,
+          position: destination,
+          title: "Incident location",
+          label: {
+            text: "I",
+            color: "#ffffff",
+            fontWeight: "700",
+          },
+        });
+        overlaysRef.current.push(responderMarker, incidentMarker);
 
         directionsService.route(
           {
@@ -146,8 +174,6 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
 
     renderRoute().then(() => {
       if (!currentMap || !window.google?.maps || !mounted) return;
-      markersRef.current.forEach((marker) => marker.setMap(null));
-      markersRef.current = [];
 
       (hazards || []).forEach((hazard) => {
         const color = hazard.type === "fire" ? "#ef4444" : "#38bdf8";
@@ -161,7 +187,7 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
           center: hazard.location,
           radius: 25,
         });
-        markersRef.current.push(circle);
+        overlaysRef.current.push(circle);
       });
     }).catch((err) => {
       console.error("Failed to render route and map", err);
@@ -169,8 +195,12 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
 
     return () => {
       mounted = false;
-      markersRef.current.forEach((marker) => marker.setMap(null));
-      markersRef.current = [];
+      overlaysRef.current.forEach((overlay) => {
+        if (overlay && typeof overlay.setMap === "function") {
+          overlay.setMap(null);
+        }
+      });
+      overlaysRef.current = [];
     };
   }, [apiKey, origin, destination, hazards]);
 
