@@ -15,6 +15,7 @@ import {
   type MicFrequencyMessage,
   type MicStatusMessage,
 } from "../lib/broadcast";
+import { randomPointNearDemoCampus } from "../lib/geo";
 
 const INGEST_URL = process.env.NEXT_PUBLIC_INGEST_FUNCTION_URL ?? "";
 
@@ -32,8 +33,6 @@ type DetectionResult = {
   bbox: { x: number; y: number; w: number; h: number };
   inferenceMs: number;
 };
-
-const DEFAULT_LOCATION = { lat: 12.9717, lng: 77.5947 };
 
 // Motion detection tuning
 const MOTION_THRESHOLD = 30; // pixel diff threshold
@@ -472,13 +471,14 @@ export function CrisisInjectionShell() {
     try {
       const frame = captureFrame();
       const requestId = `yolo-auto-${Math.floor(Date.now() / 1000)}-${Math.random().toString(36).slice(2, 10)}`;
+      const location = randomPointNearDemoCampus();
       const payload = {
         requestId,
         cameraId: "browser-camera-01",
         timestamp: isoNow(),
         imageBase64: stripDataUrlPrefix(frame),
         imageMimeType: "image/jpeg",
-        location: DEFAULT_LOCATION,
+        location,
       };
 
       appendLog("send", `AUTO-POST ${INGEST_URL.slice(0, 56)}...`);
@@ -514,13 +514,14 @@ export function CrisisInjectionShell() {
     if (!INGEST_URL) return;
     try {
       const requestId = `mic-auto-${Math.floor(Date.now() / 1000)}-${Math.random().toString(36).slice(2, 10)}`;
+      const location = randomPointNearDemoCampus();
       const payload = {
         requestId,
         cameraId: "MIC-01",
         source: "browser_microphone",
         sourceType: "microphone",
         timestamp: isoNow(),
-        location: DEFAULT_LOCATION,
+        location,
         volume,
         confidence: confidence / 100,
       };
@@ -553,13 +554,14 @@ export function CrisisInjectionShell() {
     try {
       const frame = captureFrame();
       const requestId = `cam-browser-${Math.floor(Date.now() / 1000)}-${Math.random().toString(36).slice(2, 10)}`;
+      const location = randomPointNearDemoCampus();
       const payload = {
         requestId,
         cameraId: "browser-camera-01",
         timestamp: isoNow(),
         imageBase64: stripDataUrlPrefix(frame),
         imageMimeType: "image/jpeg",
-        location: DEFAULT_LOCATION,
+        location,
       };
 
       appendLog("send", `POST ${INGEST_URL.slice(0, 56)}...`);
