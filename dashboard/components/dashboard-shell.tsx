@@ -8,6 +8,7 @@ import { auth, db } from "../lib/firebase";
 import { Incident } from "../lib/types";
 import { playSirenDebounced } from "../lib/siren";
 import { PerceptionTier } from "./perception-tier";
+import { DEMO_CENTER, haversineMeters, normalizeToDemoCampus, randomPointNearDemoCampus } from "../lib/geo";
 
 type ResponderPin = {
   id: string;
@@ -28,12 +29,11 @@ type TriageDraft = {
   requiredSkill: string;
 };
 
-const CAMPUS_BOUNDS = {
-  north: 12.9735,
-  south: 12.9695,
-  east: 77.5985,
-  west: 77.591,
-};
+declare global {
+  interface Window {
+    google?: any;
+  }
+}
 
 const ACTIVE_STATUSES = new Set(["detected", "assigned", "acknowledged", "unacked_escalation", "triage_required"]);
 const MAP_ACTIVE_WINDOW_MS = 60 * 60 * 1000;
@@ -51,18 +51,23 @@ function isRecentOperationalIncident(incident: Incident, nowMs: number) {
   return ts !== null && ts >= nowMs - MAP_ACTIVE_WINDOW_MS;
 }
 
-function locationToPercent(location?: { lat?: number; lng?: number }) {
-  const lat = Number(location?.lat);
-  const lng = Number(location?.lng);
-  if (Number.isNaN(lat) || Number.isNaN(lng)) {
-    return { x: 50, y: 50 };
-  }
-  const x = ((lng - CAMPUS_BOUNDS.west) / (CAMPUS_BOUNDS.east - CAMPUS_BOUNDS.west)) * 100;
-  const y = ((CAMPUS_BOUNDS.north - lat) / (CAMPUS_BOUNDS.north - CAMPUS_BOUNDS.south)) * 100;
-  return {
-    x: Math.min(98, Math.max(2, x)),
-    y: Math.min(98, Math.max(2, y)),
-  };
+let mapScriptPromise: Promise<void> | null = null;
+
+function loadGoogleMaps(apiKey: string): Promise<void> {
+  if (typeof window === "undefined") return Promise.resolve();
+  if (window.google?.maps) return Promise.resolve();
+  if (mapScriptPromise) return mapScriptPromise;
+
+  mapScriptPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}`;
+    script.async = true;
+    script.defer = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Failed to load Google Maps JavaScript API."));
+    document.head.appendChild(script);
+  });
+  return mapScriptPromise;
 }
 
 function formatTime(value?: string | null) {
@@ -320,145 +325,165 @@ function TacticalMap({
   responders: ResponderPin[];
   simPositions: Record<string, { lat: number; lng: number }>;
 }) {
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const viewportRef = useRef<HTMLDivElement | null>(null);
-  const dragStateRef = useRef<{ pointerId: number; startX: number; startY: number; baseX: number; baseY: number } | null>(null);
+  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
+  const mapRef = useRef<HTMLDivElement | null>(null);
+  const mapInstanceRef = useRef<any | null>(null);
+  const incidentMarkersRef = useRef<Record<string, any>>({});
+  const responderMarkersRef = useRef<Record<string, any>>({});
+  const hasInitialFitRef = useRef(false);
+  const [error, setError] = useState<string | null>(null);
 
   const activeIncidents = useMemo(() => {
     const nowMs = Date.now();
     return incidents.filter((incident) => isRecentOperationalIncident(incident, nowMs));
   }, [incidents]);
 
-  const clampPan = useCallback((nextPan: { x: number; y: number }, nextZoom: number) => {
-    const viewport = viewportRef.current;
-    if (!viewport) return nextPan;
-    const width = viewport.clientWidth || 0;
-    const height = viewport.clientHeight || 0;
-    const maxX = Math.max(0, ((nextZoom - 1) * width) / 2);
-    const maxY = Math.max(0, ((nextZoom - 1) * height) / 2);
-    return {
-      x: Math.min(maxX, Math.max(-maxX, nextPan.x)),
-      y: Math.min(maxY, Math.max(-maxY, nextPan.y)),
-    };
-  }, []);
-
-  const setZoomWithClamp = useCallback((nextZoom: number) => {
-    const clampedZoom = Math.min(2.4, Math.max(1, Number(nextZoom.toFixed(2))));
-    setZoom(clampedZoom);
-    setPan((current) => clampPan(current, clampedZoom));
-  }, [clampPan]);
-
-  const resetView = useCallback(() => {
-    setZoom(1);
-    setPan({ x: 0, y: 0 });
-  }, []);
-
-  const onWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const delta = event.deltaY > 0 ? -0.1 : 0.1;
-    setZoomWithClamp(zoom + delta);
-  }, [setZoomWithClamp, zoom]);
-
-  const onPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    const target = event.target as HTMLElement;
-    if (target.closest("button")) return;
-    dragStateRef.current = {
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      baseX: pan.x,
-      baseY: pan.y,
-    };
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }, [pan.x, pan.y]);
-
-  const onPointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    const dragState = dragStateRef.current;
-    if (!dragState || dragState.pointerId !== event.pointerId) return;
-    const nextPan = {
-      x: dragState.baseX + (event.clientX - dragState.startX),
-      y: dragState.baseY + (event.clientY - dragState.startY),
-    };
-    setPan(clampPan(nextPan, zoom));
-  }, [clampPan, zoom]);
-
-  const onPointerEnd = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    const dragState = dragStateRef.current;
-    if (!dragState || dragState.pointerId !== event.pointerId) return;
-    dragStateRef.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
+  useEffect(() => {
+    if (!apiKey || !mapRef.current) {
+      if (!apiKey) setError("NEXT_PUBLIC_GOOGLE_MAPS_API_KEY is required for SOC Response Map.");
+      return;
     }
-  }, []);
+    let mounted = true;
+
+    async function initMap() {
+      try {
+        await loadGoogleMaps(apiKey);
+        if (!mounted || !mapRef.current || !window.google?.maps) return;
+        const maps = window.google.maps;
+        mapInstanceRef.current = new maps.Map(mapRef.current, {
+          center: DEMO_CENTER,
+          zoom: 17,
+          mapTypeId: maps.MapTypeId.ROADMAP,
+          mapTypeControl: true,
+          streetViewControl: false,
+          fullscreenControl: false,
+          styles: [{ featureType: "poi", stylers: [{ visibility: "off" }] }],
+        });
+        setError(null);
+      } catch (err) {
+        if (mounted) setError(err instanceof Error ? err.message : "Failed to render SOC map.");
+      }
+    }
+
+    initMap();
+
+    return () => {
+      mounted = false;
+      Object.values(incidentMarkersRef.current).forEach((marker) => marker.setMap(null));
+      Object.values(responderMarkersRef.current).forEach((marker) => marker.setMap(null));
+      incidentMarkersRef.current = {};
+      responderMarkersRef.current = {};
+      mapInstanceRef.current = null;
+      hasInitialFitRef.current = false;
+    };
+  }, [apiKey]);
+
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    const maps = window.google?.maps;
+    if (!map || !maps) return;
+
+    const bounds = new maps.LatLngBounds();
+    bounds.extend(DEMO_CENTER);
+    let hasDynamicMarkers = false;
+
+    const nextIncidentIds = new Set<string>();
+    activeIncidents.forEach((incident) => {
+      if (incident.location?.lat === undefined || incident.location?.lng === undefined) return;
+      const point = normalizeToDemoCampus(incident.location);
+      const severity = String(incident.severity?.enriched || incident.severity?.provisional || "medium").toLowerCase();
+      const color = "#ef4444";
+
+      let marker = incidentMarkersRef.current[incident.id];
+      if (!marker) {
+        marker = new maps.Marker({ map });
+        incidentMarkersRef.current[incident.id] = marker;
+      }
+      marker.setPosition(point);
+      marker.setTitle(`${incident.id} (${severity})`);
+      marker.setIcon({
+        path: maps.SymbolPath.CIRCLE,
+        scale: severity === "critical" ? 10 : 8,
+        fillColor: color,
+        fillOpacity: 1,
+        strokeColor: "#ffffff",
+        strokeWeight: 2,
+      });
+      marker.setAnimation(maps.Animation.BOUNCE);
+      marker.setMap(map);
+
+      nextIncidentIds.add(incident.id);
+      bounds.extend(point);
+      hasDynamicMarkers = true;
+    });
+
+    Object.keys(incidentMarkersRef.current).forEach((id) => {
+      if (nextIncidentIds.has(id)) return;
+      incidentMarkersRef.current[id].setMap(null);
+      delete incidentMarkersRef.current[id];
+    });
+
+    const nextResponderIds = new Set<string>();
+    responders.filter((responder) => !responder.disabled).forEach((responder) => {
+      const live = simPositions[responder.id] || responder.lastKnownLocation;
+      const point = normalizeToDemoCampus(live);
+      const assigned = activeIncidents.some((incident) =>
+        incident.assignedResponderId === responder.id &&
+        ["assigned", "acknowledged"].includes(String(incident.status))
+      );
+
+      let marker = responderMarkersRef.current[responder.id];
+      if (!marker) {
+        marker = new maps.Marker({ map });
+        responderMarkersRef.current[responder.id] = marker;
+      }
+      marker.setPosition(point);
+      marker.setTitle(responder.displayName || responder.id);
+      marker.setLabel({
+        text: (responder.displayName || responder.id).slice(0, 2).toUpperCase(),
+        color: "#ffffff",
+        fontSize: "10px",
+        fontWeight: "700",
+      });
+      marker.setIcon({
+        path: maps.SymbolPath.CIRCLE,
+        scale: 11,
+        fillColor: responder.availability === false ? "#64748b" : assigned ? "#f59e0b" : "#22c55e",
+        fillOpacity: 0.95,
+        strokeColor: "#ffffff",
+        strokeWeight: 2,
+      });
+      marker.setMap(map);
+
+      nextResponderIds.add(responder.id);
+      bounds.extend(point);
+      hasDynamicMarkers = true;
+    });
+
+    Object.keys(responderMarkersRef.current).forEach((id) => {
+      if (nextResponderIds.has(id)) return;
+      responderMarkersRef.current[id].setMap(null);
+      delete responderMarkersRef.current[id];
+    });
+
+    // Fit once to avoid continuous map re-centering flicker while markers update.
+    if (!hasInitialFitRef.current) {
+      if (hasDynamicMarkers) map.fitBounds(bounds, 40);
+      else map.setCenter(DEMO_CENTER);
+      hasInitialFitRef.current = true;
+    }
+  }, [activeIncidents, responders, simPositions]);
 
   return (
     <section className="card soc-panel map-panel" aria-label="Tactical map">
       <div className="panel-heading">
         <div>
           <h2>Response Map</h2>
-          <p>Responder proximity and active incident locations</p>
+          <p>Google campus map with live responder and incident markers</p>
         </div>
       </div>
-      <div className="soc-map-toolbar" aria-label="Map controls">
-        <button type="button" className="button-subtle" onClick={() => setZoomWithClamp(zoom + 0.2)}>Zoom In</button>
-        <button type="button" className="button-subtle" onClick={() => setZoomWithClamp(zoom - 0.2)}>Zoom Out</button>
-        <button type="button" className="button-subtle" onClick={resetView}>Reset</button>
-      </div>
-      <div
-        className="simulation-board soc-map-board"
-        ref={viewportRef}
-        onWheel={onWheel}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerEnd}
-        onPointerCancel={onPointerEnd}
-      >
-        <div
-          className="soc-map-content"
-          style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
-        >
-          <span className="sim-zone-label" style={{ left: "12%", top: "15%" }}>LOBBY</span>
-          <span className="sim-zone-label" style={{ left: "52%", top: "15%" }}>EAST WING</span>
-          <span className="sim-zone-label" style={{ left: "12%", top: "62%" }}>CORRIDOR A</span>
-          <span className="sim-zone-label" style={{ left: "62%", top: "62%" }}>EXIT BLOCK</span>
-          <span className="sim-zone-label" style={{ left: "40%", top: "85%", fontSize: "12px", opacity: 0.15 }}>PARKING NORTH</span>
-          <span className="sim-zone-label" style={{ left: "80%", top: "35%", fontSize: "12px", opacity: 0.15 }}>SERVER ROOM</span>
-
-          {activeIncidents.map((incident) => {
-            const severity = String(incident.severity?.enriched || incident.severity?.provisional || "medium").toLowerCase();
-            const normalizedSeverity = ["low", "medium", "high", "critical"].includes(severity) ? severity : "medium";
-            const pos = incident.location?.lat !== undefined && incident.location?.lng !== undefined ? incident.location : undefined;
-            if (!pos) return null;
-            const point = locationToPercent(pos);
-            return (
-              <div
-                key={`incident-${incident.id}`}
-                className={`map-incident-pin map-incident-pin-${normalizedSeverity} ${incident.status === "triage_required" ? "map-incident-triage" : ""}`}
-                style={{ left: `${point.x}%`, top: `${point.y}%` }}
-                title={`${incident.id} (${normalizedSeverity})`}
-              />
-            );
-          })}
-
-          {responders.filter((responder) => !responder.disabled).map((responder) => {
-            const simPos = simPositions[responder.id];
-            const point = locationToPercent(simPos || responder.lastKnownLocation);
-            const assigned = activeIncidents.some((incident) => incident.assignedResponderId === responder.id && ["assigned", "acknowledged"].includes(String(incident.status)));
-            const freshGps = responder.updatedAt ? Date.now() - Date.parse(responder.updatedAt) < 30000 : false;
-            return (
-              <div
-                key={responder.id}
-                className={`map-responder-pin ${responder.availability === false ? "map-pin-offline" : ""} ${assigned ? "map-pin-assigned" : ""} ${freshGps ? "map-pin-live" : ""}`}
-                style={{ left: `${point.x}%`, top: `${point.y}%`, transition: "all 0.5s linear" }}
-                title={`${responder.displayName || responder.id} - last seen ${lastSeenLabel(responder.updatedAt)}`}
-              >
-                {(responder.displayName || responder.id).slice(0, 2).toUpperCase()}
-              </div>
-            );
-          })}
-        </div>
-      </div>
+      <div className="route-map soc-map-board" ref={mapRef} />
+      {error ? <p className="error inline">{error}</p> : null}
     </section>
   );
 }
@@ -525,57 +550,116 @@ export function DashboardShell() {
   // Simulation State
   const [simPositions, setSimPositions] = useState<Record<string, { lat: number; lng: number }>>({});
   const lastSimWriteRef = useRef<Record<string, number>>({});
+  const patrolStateRef = useRef<Record<string, { headingRad: number; speedMps: number }>>({});
   useEffect(() => {
     if (!user) return;
     const interval = setInterval(() => {
       const writes: Array<{ id: string; location: { lat: number; lng: number } }> = [];
       const nowIso = new Date().toISOString();
       const nowMs = Date.now();
+      const tickSeconds = 0.5;
+      const minSeparationMeters = 14;
 
       setSimPositions(prev => {
         const next = { ...prev };
         let changed = false;
+        const usedPoints: Array<{ id: string; point: { lat: number; lng: number } }> = [];
 
         responders.forEach((r) => {
           if (r.disabled || r.availability === false) return;
           const activeIncident = incidents.find((inc) =>
             inc.assignedResponderId === r.id &&
-            ["assigned", "acknowledged"].includes(String(inc.status)) &&
+            String(inc.status) === "acknowledged" &&
             inc.location?.lat !== undefined &&
             inc.location?.lng !== undefined
           );
-          if (!activeIncident) return;
+          const hasAssignment = Boolean(activeIncident);
+          const currentBase = next[r.id] || normalizeToDemoCampus(r.lastKnownLocation);
+          let current = normalizeToDemoCampus(currentBase);
 
-          // Initialize simulation position from Firestore presence if missing.
-          if (!next[r.id]) {
-            const lat = Number(r.lastKnownLocation?.lat);
-            const lng = Number(r.lastKnownLocation?.lng);
-            if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
-            next[r.id] = { lat, lng };
-            changed = true;
+          // De-stack bootstrap for idle responders.
+          if (!hasAssignment) {
+            const tooClose = usedPoints.some(({ point }) =>
+              haversineMeters(point, current) < minSeparationMeters
+            );
+            const centeredAtFallback = haversineMeters(current, DEMO_CENTER) < 1;
+            if (tooClose || centeredAtFallback || !next[r.id]) {
+              let candidate = randomPointNearDemoCampus();
+              let attempts = 0;
+              while (attempts < 24 && usedPoints.some(({ point }) => haversineMeters(point, candidate) < minSeparationMeters)) {
+                candidate = randomPointNearDemoCampus();
+                attempts += 1;
+              }
+              current = candidate;
+              next[r.id] = current;
+              changed = true;
+              // Prioritize persistence when responder had centered/stacked location.
+              lastSimWriteRef.current[r.id] = 0;
+            }
           }
-          const current = next[r.id];
-          if (!current) return;
 
-          const target = activeIncident.location!;
-          const speed = 0.00018;
-          const dLat = Number(target.lat) - current.lat;
-          const dLng = Number(target.lng) - current.lng;
-          const dist = Math.sqrt(dLat * dLat + dLng * dLng);
-          if (!Number.isFinite(dist) || dist <= 0) return;
-          if (dist <= speed) return;
+          let moved: { lat: number; lng: number } | null = null;
 
-          const moved = {
-            lat: current.lat + (dLat / dist) * speed,
-            lng: current.lng + (dLng / dist) * speed,
-          };
-          next[r.id] = moved;
-          changed = true;
+          if (hasAssignment && activeIncident) {
+            const target = normalizeToDemoCampus(activeIncident.location);
+            const speed = 0.00018;
+            const dLat = Number(target.lat) - current.lat;
+            const dLng = Number(target.lng) - current.lng;
+            const dist = Math.sqrt(dLat * dLat + dLng * dLng);
+            if (Number.isFinite(dist) && dist > speed) {
+              moved = {
+                lat: current.lat + (dLat / dist) * speed,
+                lng: current.lng + (dLng / dist) * speed,
+              };
+            } else {
+              moved = current;
+            }
+          } else {
+            const patrol = patrolStateRef.current[r.id] || {
+              headingRad: Math.random() * Math.PI * 2,
+              speedMps: 0.9 + Math.random() * 0.8,
+            };
+            patrol.headingRad += (Math.random() - 0.5) * 0.18;
+            patrol.speedMps = Math.min(1.9, Math.max(0.7, patrol.speedMps + (Math.random() - 0.5) * 0.12));
+            patrolStateRef.current[r.id] = patrol;
+
+            const distanceMeters = patrol.speedMps * tickSeconds;
+            const latScale = 111320;
+            const lngScale = 111320 * Math.cos((current.lat * Math.PI) / 180);
+            const dNorth = Math.cos(patrol.headingRad) * distanceMeters;
+            const dEast = Math.sin(patrol.headingRad) * distanceMeters;
+            let candidate = {
+              lat: current.lat + dNorth / latScale,
+              lng: current.lng + dEast / Math.max(1, lngScale),
+            };
+            candidate = normalizeToDemoCampus(candidate);
+
+            if (haversineMeters(candidate, DEMO_CENTER) >= 398) {
+              patrol.headingRad = (patrol.headingRad + Math.PI + (Math.random() - 0.5) * 0.6) % (Math.PI * 2);
+              const dNorth2 = Math.cos(patrol.headingRad) * distanceMeters;
+              const dEast2 = Math.sin(patrol.headingRad) * distanceMeters;
+              candidate = normalizeToDemoCampus({
+                lat: current.lat + dNorth2 / latScale,
+                lng: current.lng + dEast2 / Math.max(1, lngScale),
+              });
+            }
+            moved = candidate;
+          }
+
+          if (moved) {
+            next[r.id] = moved;
+            usedPoints.push({ id: r.id, point: moved });
+            if (Math.abs(moved.lat - current.lat) > 1e-10 || Math.abs(moved.lng - current.lng) > 1e-10) {
+              changed = true;
+            }
+          } else {
+            usedPoints.push({ id: r.id, point: current });
+          }
 
           const lastWrite = lastSimWriteRef.current[r.id] || 0;
           if (nowMs - lastWrite >= 2000) {
             lastSimWriteRef.current[r.id] = nowMs;
-            writes.push({ id: r.id, location: moved });
+            writes.push({ id: r.id, location: next[r.id] || current });
           }
         });
 

@@ -9,6 +9,7 @@ import { Incident } from "../lib/types";
 import { RouteMap } from "./route-map";
 import { enqueuePendingAck, flushPendingAcks, listPendingAcks } from "../lib/offline-ack-queue";
 import { playSirenDebounced } from "../lib/siren";
+import { haversineMeters, normalizeToDemoCampus } from "../lib/geo";
 
 const ACK_FUNCTION_URL = process.env.NEXT_PUBLIC_ACK_FUNCTION_URL ?? "";
 
@@ -43,17 +44,6 @@ function formatTime(value?: string | null) {
 function displayValue(value?: string | null) {
   if (!value) return "-";
   return value.replaceAll("_", " ");
-}
-
-function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number) {
-  const R = 6371e3;
-  const rad = Math.PI / 180;
-  const dLat = (lat2 - lat1) * rad;
-  const dLng = (lng2 - lng1) * rad;
-  const a = Math.sin(dLat / 2) ** 2 +
-    Math.cos(lat1 * rad) * Math.cos(lat2 * rad) *
-    Math.sin(dLng / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 function AckCountdownRing({ ackDeadline }: { ackDeadline?: string | null }) {
@@ -282,7 +272,6 @@ export function ResponderShell() {
   const biddedIncidents = useRef<Set<string>>(new Set());
   const seenAssignedRef = useRef<Set<string>>(new Set());
   const crisisTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastPresenceWriteRef = useRef(0);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (next) => {
@@ -364,15 +353,6 @@ export function ResponderShell() {
         };
         setCurrentLocation(next);
         setGeoError(null);
-
-        const now = Date.now();
-        if (now - lastPresenceWriteRef.current < 5000) return;
-        lastPresenceWriteRef.current = now;
-        setDoc(doc(db, "users", user.uid), {
-          lastKnownLocation: next,
-          availability: true,
-          updatedAt: new Date(now).toISOString(),
-        }, { merge: true }).catch((err) => setGeoError(err.message));
       },
       (err) => setGeoError(err.message),
       { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
@@ -393,13 +373,14 @@ export function ResponderShell() {
 
         let score = 0;
         let distance = 0;
-        if (profile.lastKnownLocation && incident.location) {
-          const lat1 = Number(profile.lastKnownLocation.lat);
-          const lng1 = Number(profile.lastKnownLocation.lng);
+        if (incident.location) {
+          const profileLocation = normalizeToDemoCampus(profile.lastKnownLocation);
+          const lat1 = Number(profileLocation.lat);
+          const lng1 = Number(profileLocation.lng);
           const lat2 = Number(incident.location.lat);
           const lng2 = Number(incident.location.lng);
           if (!Number.isNaN(lat1) && !Number.isNaN(lng1) && !Number.isNaN(lat2) && !Number.isNaN(lng2)) {
-            distance = Math.max(1, haversineMeters(lat1, lng1, lat2, lng2));
+            distance = Math.max(1, haversineMeters({ lat: lat1, lng: lng1 }, { lat: lat2, lng: lng2 }));
             const requiredSkill = incident.requiredSkill || "general";
             const hasSkill = requiredSkill === "general" || (profile.skills || []).includes(requiredSkill);
             const severity = incident.severity?.provisional || "medium";
@@ -457,19 +438,16 @@ export function ResponderShell() {
   );
 
   const effectiveLocation = useMemo(() => {
-    if (currentLocation) return currentLocation;
-    const lat = Number(profile?.lastKnownLocation?.lat);
-    const lng = Number(profile?.lastKnownLocation?.lng);
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-    return { lat, lng };
-  }, [currentLocation, profile?.lastKnownLocation?.lat, profile?.lastKnownLocation?.lng]);
+    if (!profile?.lastKnownLocation) return normalizeToDemoCampus(null);
+    return normalizeToDemoCampus(profile.lastKnownLocation);
+  }, [profile?.lastKnownLocation?.lat, profile?.lastKnownLocation?.lng]);
 
   const activeDistanceMeters = useMemo(() => {
     if (!activeIncident?.location || !effectiveLocation) return null;
     const lat2 = Number(activeIncident.location.lat);
     const lng2 = Number(activeIncident.location.lng);
     if (!Number.isFinite(lat2) || !Number.isFinite(lng2)) return null;
-    return haversineMeters(effectiveLocation.lat, effectiveLocation.lng, lat2, lng2);
+    return haversineMeters(effectiveLocation, { lat: lat2, lng: lng2 });
   }, [activeIncident, effectiveLocation]);
 
   async function onSignIn(event: React.FormEvent) {
@@ -609,7 +587,7 @@ export function ResponderShell() {
         </div>
         <div className="responder-status-pill rsp-neutral">{incidents.length} tasks</div>
         <div className={`responder-status-pill ${pendingCount > 0 ? "rsp-warning" : "rsp-neutral"}`}>{pendingCount} queued</div>
-        <div className="responder-status-pill rsp-neutral">{currentLocation ? `${currentLocation.lat.toFixed(4)}, ${currentLocation.lng.toFixed(4)}` : origin ? `${origin.lat.toFixed(4)}, ${origin.lng.toFixed(4)}` : "No GPS"}</div>
+        <div className="responder-status-pill rsp-neutral">{origin ? `${origin.lat.toFixed(4)}, ${origin.lng.toFixed(4)}` : "No GPS"}</div>
       </section>
 
       {error && <p className="error inline">{error}</p>}

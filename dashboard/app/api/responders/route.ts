@@ -1,4 +1,5 @@
 import { adminAuth, adminDb, assertAdminFromRequest } from "../../../lib/firebase-admin";
+import { randomPointNearDemoCampus } from "../../../lib/geo";
 
 export const runtime = "nodejs";
 
@@ -47,7 +48,7 @@ export async function POST(request: Request) {
   const displayName = String((body as Record<string, unknown>).displayName || "").trim();
   const availability = Boolean((body as Record<string, unknown>).availability ?? true);
   const skills = cleanSkills((body as Record<string, unknown>).skills);
-  const location = cleanLocation((body as Record<string, unknown>).lastKnownLocation);
+  const location = cleanLocation((body as Record<string, unknown>).lastKnownLocation) || randomPointNearDemoCampus();
 
   if (!email || !password || password.length < 6 || !displayName) {
     return Response.json({ error: "email_password_displayName_required" }, { status: 400 });
@@ -67,7 +68,7 @@ export async function POST(request: Request) {
     disabled: false,
     createdAt,
     updatedAt: createdAt,
-    ...(location ? { lastKnownLocation: location } : {}),
+    lastKnownLocation: location,
   };
 
   await adminDb.collection("users").doc(user.uid).set(profile, { merge: true });

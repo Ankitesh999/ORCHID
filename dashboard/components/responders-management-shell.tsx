@@ -5,6 +5,7 @@ import { onAuthStateChanged, signInWithEmailAndPassword, signOut, User } from "f
 import { collection, onSnapshot, query, where } from "firebase/firestore";
 
 import { auth, db } from "../lib/firebase";
+import { DEMO_CENTER, randomPointNearDemoCampus } from "../lib/geo";
 
 type ResponderProfile = {
   id: string;
@@ -46,15 +47,18 @@ const SKILLS = [
   "general",
 ];
 
-const EMPTY_DRAFT: Draft = {
-  email: "",
-  password: "",
-  displayName: "",
-  skills: ["general"],
-  availability: true,
-  lat: "12.9717",
-  lng: "77.5947",
-};
+function createEmptyDraft(): Draft {
+  const seed = randomPointNearDemoCampus();
+  return {
+    email: "",
+    password: "",
+    displayName: "",
+    skills: ["general"],
+    availability: true,
+    lat: seed.lat.toString(),
+    lng: seed.lng.toString(),
+  };
+}
 
 function displayValue(value?: string) {
   return (value || "general").replaceAll("_", " ");
@@ -102,7 +106,7 @@ export function RespondersManagementShell() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [responders, setResponders] = useState<ResponderProfile[]>([]);
-  const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
+  const [draft, setDraft] = useState<Draft>(() => createEmptyDraft());
   const [editing, setEditing] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -165,8 +169,8 @@ export function RespondersManagementShell() {
       displayName: responder.displayName || "",
       skills: responder.skills?.length ? responder.skills : ["general"],
       availability: responder.availability !== false,
-      lat: responder.lastKnownLocation?.lat?.toString() || "12.9717",
-      lng: responder.lastKnownLocation?.lng?.toString() || "77.5947",
+      lat: responder.lastKnownLocation?.lat?.toString() || DEMO_CENTER.lat.toString(),
+      lng: responder.lastKnownLocation?.lng?.toString() || DEMO_CENTER.lng.toString(),
     });
     setError(null);
     setNotice(null);
@@ -174,7 +178,7 @@ export function RespondersManagementShell() {
 
   function resetDraft() {
     setEditing(null);
-    setDraft(EMPTY_DRAFT);
+    setDraft(createEmptyDraft());
   }
 
   async function saveResponder(event: FormEvent) {
@@ -265,6 +269,24 @@ export function RespondersManagementShell() {
     }
   }
 
+  async function resetIncidents() {
+    if (!user) return;
+    const confirmed = typeof window !== "undefined" ? window.confirm("Delete all incidents for a fresh demo run?") : true;
+    if (!confirmed) return;
+    setSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const payload = await apiFetch(user, "/api/incidents/reset", { method: "POST" });
+      const deleted = Number(payload.deleted || 0);
+      setNotice(`Incident reset completed. Deleted ${deleted} incident(s).`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Incident reset failed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   if (loading) {
     return <main className="admin-shell"><p>Loading...</p></main>;
   }
@@ -301,6 +323,7 @@ export function RespondersManagementShell() {
         </div>
         <div className="topbar-actions">
           <a href="/" className="inject-nav-link">SOC Dashboard</a>
+          <button className="button-subtle danger-subtle" onClick={resetIncidents} disabled={saving}>Reset Incidents</button>
           <span>{user.email}</span>
           <button className="button-subtle" onClick={() => signOut(auth)}>Sign Out</button>
         </div>

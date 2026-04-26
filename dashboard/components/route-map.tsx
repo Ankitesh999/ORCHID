@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { DEMO_CENTER, normalizeToDemoCampus } from "../lib/geo";
 
 type Coordinates = {
   lat: number;
@@ -88,6 +89,8 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
 
     async function renderRoute() {
       if (!mapRef.current || !origin || !destination) return;
+      const safeOrigin = normalizeToDemoCampus(origin);
+      const safeDestination = normalizeToDemoCampus(destination);
 
       try {
         await loadGoogleMaps(apiKey);
@@ -95,7 +98,7 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
 
         const googleMaps = window.google.maps;
         const map = new googleMaps.Map(mapRef.current, {
-          center: destination,
+          center: DEMO_CENTER,
           zoom: 16,
           mapTypeControl: false,
           streetViewControl: false,
@@ -121,13 +124,13 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
         overlaysRef.current.push(directionsRenderer);
 
         const bounds = new googleMaps.LatLngBounds();
-        bounds.extend(origin);
-        bounds.extend(destination);
+        bounds.extend(safeOrigin);
+        bounds.extend(safeDestination);
         map.fitBounds(bounds);
 
         const responderMarker = new googleMaps.Marker({
           map,
-          position: origin,
+          position: safeOrigin,
           title: "Responder location",
           label: {
             text: "R",
@@ -137,7 +140,7 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
         });
         const incidentMarker = new googleMaps.Marker({
           map,
-          position: destination,
+          position: safeDestination,
           title: "Incident location",
           label: {
             text: "I",
@@ -149,8 +152,8 @@ export function RouteMap({ origin, destination, hazards, className, indoorNote }
 
         directionsService.route(
           {
-            origin,
-            destination,
+            origin: safeOrigin,
+            destination: safeDestination,
             travelMode: googleMaps.TravelMode.WALKING,
           },
           (result: any, status: string) => {
