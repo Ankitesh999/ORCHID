@@ -79,7 +79,18 @@ async function apiFetch(user: User, path: string, init: RequestInit) {
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(payload.error || payload.message || `Request failed (${response.status})`);
+    const errorCode = typeof payload.error === "string" ? payload.error : "";
+    const errorMessage = typeof payload.message === "string" ? payload.message : "";
+    if (response.status === 401 || errorCode === "missing_auth" || errorCode === "invalid_auth") {
+      throw new Error("Authentication failed. Sign in again and retry.");
+    }
+    if (response.status === 403 || errorCode === "forbidden") {
+      throw new Error("Admin role is required for responder management actions.");
+    }
+    if (errorCode === "invalid_location") {
+      throw new Error(errorMessage || "Location must include numeric latitude and longitude.");
+    }
+    throw new Error(errorMessage || errorCode || `Request failed (${response.status})`);
   }
   return payload;
 }
@@ -169,6 +180,12 @@ export function RespondersManagementShell() {
   async function saveResponder(event: FormEvent) {
     event.preventDefault();
     if (!user) return;
+    const location = locationFromDraft(draft);
+    if (!location) {
+      setError("Latitude and longitude must be valid numbers.");
+      setNotice(null);
+      return;
+    }
     setSaving(true);
     setError(null);
     setNotice(null);
@@ -179,7 +196,7 @@ export function RespondersManagementShell() {
         displayName: draft.displayName,
         skills: draft.skills,
         availability: draft.availability,
-        lastKnownLocation: locationFromDraft(draft),
+        lastKnownLocation: location,
       };
       if (editing) {
         await apiFetch(user, `/api/responders/${editing}`, {
@@ -208,17 +225,41 @@ export function RespondersManagementShell() {
     }
   }
 
-  async function disableResponder(uid: string) {
+  async function toggleResponderState(responder: ResponderProfile) {
     if (!user) return;
     setSaving(true);
     setError(null);
     setNotice(null);
     try {
+      const willDisable = !responder.disabled;
+      await apiFetch(user, `/api/responders/${responder.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          disabled: willDisable,
+          availability: willDisable ? false : true,
+        }),
+      });
+      setNotice(willDisable ? "Responder disabled." : "Responder enabled.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Responder state update failed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteResponder(uid: string) {
+    if (!user) return;
+    const confirmed = typeof window !== "undefined" ? window.confirm("Permanently delete this responder account? This cannot be undone.") : true;
+    if (!confirmed) return;
+    setSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
       await apiFetch(user, `/api/responders/${uid}`, { method: "DELETE" });
-      setNotice("Responder disabled.");
+      setNotice("Responder permanently deleted.");
       if (editing === uid) resetDraft();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Responder disable failed.");
+      setError(err instanceof Error ? err.message : "Responder delete failed.");
     } finally {
       setSaving(false);
     }
@@ -346,7 +387,22 @@ export function RespondersManagementShell() {
                 </span>
                 <div className="admin-row-actions">
                   <button className="button-subtle" type="button" onClick={() => startEdit(responder)}>Edit</button>
-                  <button className="button-subtle danger-subtle" type="button" onClick={() => disableResponder(responder.id)} disabled={saving || responder.disabled}>Disable</button>
+                  <button
+                    className="button-subtle"
+                    type="button"
+                    onClick={() => toggleResponderState(responder)}
+                    disabled={saving}
+                  >
+                    {responder.disabled ? "Enable" : "Disable"}
+                  </button>
+                  <button
+                    className="button-subtle danger-subtle"
+                    type="button"
+                    onClick={() => deleteResponder(responder.id)}
+                    disabled={saving}
+                  >
+                    Delete
+                  </button>
                 </div>
               </div>
             ))}

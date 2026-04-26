@@ -51,6 +51,7 @@ export async function PATCH(request: Request, { params }: Params) {
     updatedAt: new Date().toISOString(),
     role: "responder",
   };
+  const hasLocationField = Object.prototype.hasOwnProperty.call(record, "lastKnownLocation");
 
   if (typeof record.email === "string" && record.email.trim()) {
     authUpdate.email = record.email.trim().toLowerCase();
@@ -71,6 +72,9 @@ export async function PATCH(request: Request, { params }: Params) {
   const skills = cleanSkills(record.skills);
   if (skills) profileUpdate.skills = skills;
   const location = cleanLocation(record.lastKnownLocation);
+  if (hasLocationField && !location) {
+    return Response.json({ error: "invalid_location", message: "lastKnownLocation must include numeric lat and lng." }, { status: 400 });
+  }
   if (location) profileUpdate.lastKnownLocation = location;
 
   if (Object.keys(authUpdate).length > 0) {
@@ -88,16 +92,13 @@ export async function DELETE(request: Request, { params }: Params) {
 
   const { uid } = await params;
   if (!uid) return Response.json({ error: "uid_required" }, { status: 400 });
-
-  const now = new Date().toISOString();
-  await adminAuth.updateUser(uid, { disabled: true });
-  await adminDb.collection("users").doc(uid).set({
-    availability: false,
-    disabled: true,
-    disabledAt: now,
-    updatedAt: now,
-    role: "responder",
-  }, { merge: true });
+  try {
+    await adminAuth.deleteUser(uid);
+  } catch (err: unknown) {
+    const code = (err as { code?: string } | null)?.code;
+    if (code !== "auth/user-not-found") throw err;
+  }
+  await adminDb.collection("users").doc(uid).delete();
 
   return Response.json({ ok: true });
 }

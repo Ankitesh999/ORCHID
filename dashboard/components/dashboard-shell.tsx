@@ -35,7 +35,21 @@ const CAMPUS_BOUNDS = {
   west: 77.591,
 };
 
-const ACTIVE_STATUSES = new Set(["detected", "assigned", "unacked_escalation", "triage_required"]);
+const ACTIVE_STATUSES = new Set(["detected", "assigned", "acknowledged", "unacked_escalation", "triage_required"]);
+const MAP_ACTIVE_WINDOW_MS = 60 * 60 * 1000;
+
+function parseIncidentTimestamp(incident: Incident) {
+  const raw = incident.updatedAt || incident.createdAt;
+  if (!raw) return null;
+  const ts = Date.parse(raw);
+  return Number.isNaN(ts) ? null : ts;
+}
+
+function isRecentOperationalIncident(incident: Incident, nowMs: number) {
+  if (!ACTIVE_STATUSES.has(String(incident.status))) return false;
+  const ts = parseIncidentTimestamp(incident);
+  return ts !== null && ts >= nowMs - MAP_ACTIVE_WINDOW_MS;
+}
 
 function locationToPercent(location?: { lat?: number; lng?: number }) {
   const lat = Number(location?.lat);
@@ -306,6 +320,78 @@ function TacticalMap({
   responders: ResponderPin[];
   simPositions: Record<string, { lat: number; lng: number }>;
 }) {
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const dragStateRef = useRef<{ pointerId: number; startX: number; startY: number; baseX: number; baseY: number } | null>(null);
+
+  const activeIncidents = useMemo(() => {
+    const nowMs = Date.now();
+    return incidents.filter((incident) => isRecentOperationalIncident(incident, nowMs));
+  }, [incidents]);
+
+  const clampPan = useCallback((nextPan: { x: number; y: number }, nextZoom: number) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return nextPan;
+    const width = viewport.clientWidth || 0;
+    const height = viewport.clientHeight || 0;
+    const maxX = Math.max(0, ((nextZoom - 1) * width) / 2);
+    const maxY = Math.max(0, ((nextZoom - 1) * height) / 2);
+    return {
+      x: Math.min(maxX, Math.max(-maxX, nextPan.x)),
+      y: Math.min(maxY, Math.max(-maxY, nextPan.y)),
+    };
+  }, []);
+
+  const setZoomWithClamp = useCallback((nextZoom: number) => {
+    const clampedZoom = Math.min(2.4, Math.max(1, Number(nextZoom.toFixed(2))));
+    setZoom(clampedZoom);
+    setPan((current) => clampPan(current, clampedZoom));
+  }, [clampPan]);
+
+  const resetView = useCallback(() => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }, []);
+
+  const onWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const delta = event.deltaY > 0 ? -0.1 : 0.1;
+    setZoomWithClamp(zoom + delta);
+  }, [setZoomWithClamp, zoom]);
+
+  const onPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    if (target.closest("button")) return;
+    dragStateRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      baseX: pan.x,
+      baseY: pan.y,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }, [pan.x, pan.y]);
+
+  const onPointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const dragState = dragStateRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    const nextPan = {
+      x: dragState.baseX + (event.clientX - dragState.startX),
+      y: dragState.baseY + (event.clientY - dragState.startY),
+    };
+    setPan(clampPan(nextPan, zoom));
+  }, [clampPan, zoom]);
+
+  const onPointerEnd = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const dragState = dragStateRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) return;
+    dragStateRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }, []);
+
   return (
     <section className="card soc-panel map-panel" aria-label="Tactical map">
       <div className="panel-heading">
@@ -314,47 +400,64 @@ function TacticalMap({
           <p>Responder proximity and active incident locations</p>
         </div>
       </div>
-      <div className="simulation-board soc-map-board">
-        <span className="sim-zone-label" style={{ left: "12%", top: "15%" }}>LOBBY</span>
-        <span className="sim-zone-label" style={{ left: "52%", top: "15%" }}>EAST WING</span>
-        <span className="sim-zone-label" style={{ left: "12%", top: "62%" }}>CORRIDOR A</span>
-        <span className="sim-zone-label" style={{ left: "62%", top: "62%" }}>EXIT BLOCK</span>
-        <span className="sim-zone-label" style={{ left: "40%", top: "85%", fontSize: '12px', opacity: 0.15 }}>PARKING NORTH</span>
-        <span className="sim-zone-label" style={{ left: "80%", top: "35%", fontSize: '12px', opacity: 0.15 }}>SERVER ROOM</span>
+      <div className="soc-map-toolbar" aria-label="Map controls">
+        <button type="button" className="button-subtle" onClick={() => setZoomWithClamp(zoom + 0.2)}>Zoom In</button>
+        <button type="button" className="button-subtle" onClick={() => setZoomWithClamp(zoom - 0.2)}>Zoom Out</button>
+        <button type="button" className="button-subtle" onClick={resetView}>Reset</button>
+      </div>
+      <div
+        className="simulation-board soc-map-board"
+        ref={viewportRef}
+        onWheel={onWheel}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerEnd}
+        onPointerCancel={onPointerEnd}
+      >
+        <div
+          className="soc-map-content"
+          style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}
+        >
+          <span className="sim-zone-label" style={{ left: "12%", top: "15%" }}>LOBBY</span>
+          <span className="sim-zone-label" style={{ left: "52%", top: "15%" }}>EAST WING</span>
+          <span className="sim-zone-label" style={{ left: "12%", top: "62%" }}>CORRIDOR A</span>
+          <span className="sim-zone-label" style={{ left: "62%", top: "62%" }}>EXIT BLOCK</span>
+          <span className="sim-zone-label" style={{ left: "40%", top: "85%", fontSize: "12px", opacity: 0.15 }}>PARKING NORTH</span>
+          <span className="sim-zone-label" style={{ left: "80%", top: "35%", fontSize: "12px", opacity: 0.15 }}>SERVER ROOM</span>
 
-        {incidents
-          .filter((incident) => ACTIVE_STATUSES.has(String(incident.status)))
-          .map((incident) => {
-            const severity = incident.severity?.enriched || incident.severity?.provisional || "medium";
-            const pos = incident.location?.lat ? incident.location : simPositions[`INC-${incident.id}`];
+          {activeIncidents.map((incident) => {
+            const severity = String(incident.severity?.enriched || incident.severity?.provisional || "medium").toLowerCase();
+            const normalizedSeverity = ["low", "medium", "high", "critical"].includes(severity) ? severity : "medium";
+            const pos = incident.location?.lat !== undefined && incident.location?.lng !== undefined ? incident.location : undefined;
             if (!pos) return null;
             const point = locationToPercent(pos);
             return (
               <div
                 key={`incident-${incident.id}`}
-                className={`map-incident-pin map-incident-pin-${severity} ${incident.status === "triage_required" ? "map-incident-triage" : ""}`}
+                className={`map-incident-pin map-incident-pin-${normalizedSeverity} ${incident.status === "triage_required" ? "map-incident-triage" : ""}`}
                 style={{ left: `${point.x}%`, top: `${point.y}%` }}
-                title={`${incident.id} (${severity})`}
+                title={`${incident.id} (${normalizedSeverity})`}
               />
             );
           })}
 
-        {responders.filter((responder) => !responder.disabled).map((responder) => {
-          const simPos = simPositions[responder.id];
-          const point = locationToPercent(simPos || responder.lastKnownLocation);
-          const assigned = incidents.some((incident) => incident.assignedResponderId === responder.id && ["assigned", "acknowledged"].includes(String(incident.status)));
-          const freshGps = responder.updatedAt ? Date.now() - Date.parse(responder.updatedAt) < 30000 : false;
-          return (
-            <div
-              key={responder.id}
-              className={`map-responder-pin ${responder.availability === false ? "map-pin-offline" : ""} ${assigned ? "map-pin-assigned" : ""} ${freshGps ? "map-pin-live" : ""}`}
-              style={{ left: `${point.x}%`, top: `${point.y}%`, transition: 'all 0.5s linear' }}
-              title={`${responder.displayName || responder.id} - last seen ${lastSeenLabel(responder.updatedAt)}`}
-            >
-              {(responder.displayName || responder.id).slice(0, 2).toUpperCase()}
-            </div>
-          );
-        })}
+          {responders.filter((responder) => !responder.disabled).map((responder) => {
+            const simPos = simPositions[responder.id];
+            const point = locationToPercent(simPos || responder.lastKnownLocation);
+            const assigned = activeIncidents.some((incident) => incident.assignedResponderId === responder.id && ["assigned", "acknowledged"].includes(String(incident.status)));
+            const freshGps = responder.updatedAt ? Date.now() - Date.parse(responder.updatedAt) < 30000 : false;
+            return (
+              <div
+                key={responder.id}
+                className={`map-responder-pin ${responder.availability === false ? "map-pin-offline" : ""} ${assigned ? "map-pin-assigned" : ""} ${freshGps ? "map-pin-live" : ""}`}
+                style={{ left: `${point.x}%`, top: `${point.y}%`, transition: "all 0.5s linear" }}
+                title={`${responder.displayName || responder.id} - last seen ${lastSeenLabel(responder.updatedAt)}`}
+              >
+                {(responder.displayName || responder.id).slice(0, 2).toUpperCase()}
+              </div>
+            );
+          })}
+        </div>
       </div>
     </section>
   );
@@ -421,53 +524,76 @@ export function DashboardShell() {
 
   // Simulation State
   const [simPositions, setSimPositions] = useState<Record<string, { lat: number; lng: number }>>({});
+  const lastSimWriteRef = useRef<Record<string, number>>({});
   useEffect(() => {
+    if (!user) return;
     const interval = setInterval(() => {
+      const writes: Array<{ id: string; location: { lat: number; lng: number } }> = [];
+      const nowIso = new Date().toISOString();
+      const nowMs = Date.now();
+
       setSimPositions(prev => {
         const next = { ...prev };
+        let changed = false;
 
-        responders.filter((r) => !r.disabled).forEach(r => {
-          // Initialize if missing
+        responders.forEach((r) => {
+          if (r.disabled || r.availability === false) return;
+          const activeIncident = incidents.find((inc) =>
+            inc.assignedResponderId === r.id &&
+            ["assigned", "acknowledged"].includes(String(inc.status)) &&
+            inc.location?.lat !== undefined &&
+            inc.location?.lng !== undefined
+          );
+          if (!activeIncident) return;
+
+          // Initialize simulation position from Firestore presence if missing.
           if (!next[r.id]) {
-            next[r.id] = r.lastKnownLocation?.lat ? { lat: r.lastKnownLocation.lat, lng: r.lastKnownLocation.lng! } : {
-              lat: CAMPUS_BOUNDS.south + Math.random() * (CAMPUS_BOUNDS.north - CAMPUS_BOUNDS.south),
-              lng: CAMPUS_BOUNDS.west + Math.random() * (CAMPUS_BOUNDS.east - CAMPUS_BOUNDS.west)
-            };
+            const lat = Number(r.lastKnownLocation?.lat);
+            const lng = Number(r.lastKnownLocation?.lng);
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+            next[r.id] = { lat, lng };
+            changed = true;
           }
+          const current = next[r.id];
+          if (!current) return;
 
-          // Check for active assignment
-          const activeIncident = incidents.find(inc => inc.assignedResponderId === r.id && inc.status === "assigned");
+          const target = activeIncident.location!;
+          const speed = 0.00018;
+          const dLat = Number(target.lat) - current.lat;
+          const dLng = Number(target.lng) - current.lng;
+          const dist = Math.sqrt(dLat * dLat + dLng * dLng);
+          if (!Number.isFinite(dist) || dist <= 0) return;
+          if (dist <= speed) return;
 
-          if (activeIncident && activeIncident.location?.lat && activeIncident.location?.lng) {
-            // Move towards incident
-            const target = activeIncident.location;
-            const speed = 0.00018;
-            const dLat = target.lat! - next[r.id].lat;
-            const dLng = target.lng! - next[r.id].lng;
-            const dist = Math.sqrt(dLat * dLat + dLng * dLng);
+          const moved = {
+            lat: current.lat + (dLat / dist) * speed,
+            lng: current.lng + (dLng / dist) * speed,
+          };
+          next[r.id] = moved;
+          changed = true;
 
-            if (dist > speed) {
-              next[r.id] = {
-                lat: next[r.id].lat + (dLat / dist) * speed,
-                lng: next[r.id].lng + (dLng / dist) * speed
-              };
-            }
-          } else {
-            // Idle random walk
-            const jitter = 0.00005;
-            next[r.id] = {
-              lat: Math.min(CAMPUS_BOUNDS.north, Math.max(CAMPUS_BOUNDS.south, next[r.id].lat + (Math.random() - 0.5) * jitter)),
-              lng: Math.min(CAMPUS_BOUNDS.east, Math.max(CAMPUS_BOUNDS.west, next[r.id].lng + (Math.random() - 0.5) * jitter))
-            };
+          const lastWrite = lastSimWriteRef.current[r.id] || 0;
+          if (nowMs - lastWrite >= 2000) {
+            lastSimWriteRef.current[r.id] = nowMs;
+            writes.push({ id: r.id, location: moved });
           }
         });
 
-        return next;
+        return changed ? next : prev;
+      });
+
+      writes.forEach(({ id, location }) => {
+        updateDoc(doc(db, "users", id), {
+          lastKnownLocation: location,
+          updatedAt: nowIso,
+        }).catch((err) => {
+          console.error(`Failed to persist simulated location for ${id}`, err);
+        });
       });
     }, 500);
 
     return () => clearInterval(interval);
-  }, [incidents, responders]);
+  }, [incidents, responders, user]);
 
   const triggerCrisisAlert = useCallback((label: string) => {
     setCrisisActive(true);
@@ -521,25 +647,6 @@ export function DashboardShell() {
       responderUnsubscribe();
     };
   }, [user]);
-
-  // Patch missing incident locations randomly for demo
-  useEffect(() => {
-    setSimPositions(prev => {
-      const next = { ...prev };
-      let changed = false;
-      incidents.forEach(inc => {
-        const key = `INC-${inc.id}`;
-        if (!inc.location?.lat && !next[key]) {
-          next[key] = {
-            lat: CAMPUS_BOUNDS.south + Math.random() * (CAMPUS_BOUNDS.north - CAMPUS_BOUNDS.south),
-            lng: CAMPUS_BOUNDS.west + Math.random() * (CAMPUS_BOUNDS.east - CAMPUS_BOUNDS.west)
-          };
-          changed = true;
-        }
-      });
-      return changed ? next : prev;
-    });
-  }, [incidents]);
 
   const counts = useMemo(() => {
     return {
