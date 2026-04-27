@@ -1,16 +1,6 @@
-# ORCHID: Offline-first Response and Crisis Handling Intelligent Dispatch
+# ORCHID
 
 ORCHID is a decentralized, AI-driven emergency response platform built for the Google Solution Challenge 2026.
-
-## Hackathon Judging Criteria
-
-- **Technical Complexity**: Event-driven ingestion, Firestore realtime sync, responder bidding, retry-aware assignment, Cloud Tasks acknowledgement checks, and offline acknowledgement replay.
-- **AI Integration**: Browser camera intake sends live image evidence to the backend for Gemini/Vertex-style classification. If live AI fails, the incident is held for manual triage instead of silently using simulated labels.
-- **Security & Privacy**: Firebase Auth custom claims separate admin and responder roles. Incident records use data minimization: classification metadata is persisted, while raw camera frames are not stored by default.
-- **Design & User Flow**: The admin SOC console focuses on incident queueing, AI provenance, manual triage, assignment rationale, and responder readiness. The responder view focuses on the current field task and offline-safe acknowledgement.
-- **Problem Definition**: ORCHID targets crisis coordination breakdowns in hotels, campuses, and venues where staff location, skill fit, network reliability, and fast acknowledgement affect response quality.
-
----
 
 ## Local Development
 
